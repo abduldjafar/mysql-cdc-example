@@ -1,0 +1,18 @@
+services:
+  mysql-cdc:
+    image: mysql:8.0
+    container_name: mysql-cdc
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: fintech_db
+    ports:
+      - "3306:3306"
+    volumes:
+      # Mounting konfigurasi custom
+      - ./my.cnf:/etc/mysql/conf.d/my.cnf
+      # Persistence data agar tidak hilang saat container dihapus
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  mysql_data:

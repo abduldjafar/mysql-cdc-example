@@ -1,0 +1,22 @@
+[package]
+name = "binlog-tap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Driver utama dengan fitur binlog
+mysql_async = { version = "0.34", features = ["binlog"] }
+
+# Runtime untuk menjalankan asinkron
+tokio = { version = "1.0", features = ["full"] }
+
+# Untuk menangani stream data binlog secara asinkron
+futures = "0.3"
+
+# Untuk serialisasi data yang ditangkap (opsional, tapi disarankan)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Untuk logging proses CDC
+log = "0.4"
+env_logger = "0.11"
