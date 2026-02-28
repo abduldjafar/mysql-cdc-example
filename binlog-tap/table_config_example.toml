@@ -1,0 +1,27 @@
+[[databases]]
+name = "analytics_db"
+url = "mysql://root:password@host-a:3306"
+server_id = 1
+tables = ["*"]
+
+# Capture specific tables from another DB  
+[[databases]]
+name = "fintech_db"
+url = "mysql://root:password@host-b:3306"
+server_id = 2
+exclude_tables = ["migrations", "audit_logs"]
+
+  # Override columns only where needed
+  [[databases.tables]]
+  name = "wallets"
+  primary_key = "id"
+  columns = ["id", "balance", "updated_at"]
+
+  [[databases.tables]]
+  name = "wallets_v2"
+  primary_key = "id"
+  columns = ["id", "balance", "updated_at"]
+
+  [[databases.tables]]
+  name = "wallets_v3"
+  primary_key = "id"

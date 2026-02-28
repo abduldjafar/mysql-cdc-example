@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # Driver utama dengan fitur binlog
-mysql_async = { version = "0.34", features = ["binlog"] }
+mysql_async = { version = "0.36.1", features = ["binlog"] }
 
 # Runtime untuk menjalankan asinkron
 tokio = { version = "1.0", features = ["full"] }
@@ -16,7 +16,12 @@ futures = "0.3"
 # Untuk serialisasi data yang ditangkap (opsional, tapi disarankan)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
+
 
 # Untuk logging proses CDC
 log = "0.4"
 env_logger = "0.11"
+
+# error handling
+thiserror = "2.0.18"

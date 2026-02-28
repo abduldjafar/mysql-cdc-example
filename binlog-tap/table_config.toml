@@ -1,0 +1,20 @@
+[[databases]]
+name = "fintech_db"
+url = "mysql://root:rootpassword@localhost:3306"
+server_id = 2
+exclude_tables = ["migrations", "audit_logs"]
+
+  # Override columns only where needed
+  [[databases.tables]]
+  name = "wallets"
+  primary_key = "id"
+
+  [[databases.tables]]
+  name = "transactions"
+  primary_key = "id"
+
+[[databases]]
+name = "ecommerce_db"
+url = "mysql://root:rootpassword@localhost:3306"
+server_id = 3
+exclude_tables = ["migrations", "audit_logs"]
