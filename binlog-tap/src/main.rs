@@ -134,10 +134,6 @@ async fn process_binlog_stream(
             Ok(event) => {
                 event_count += 1;
 
-                if event_count % 1000 == 0 {
-                    println!("📈 [binlog-tap] Processed {} events", event_count);
-                }
-
                 if let Some(event_data) = event.read_data()? {
                     // Handle TableMapEvent to cache table metadata
                     if let EventData::TableMapEvent(table_map) = event_data {
@@ -248,9 +244,9 @@ async fn process_binlog_stream(
     Ok(())
 }
 
-const BATCH_SIZE: usize = 1000;
-const FLUSH_INTERVAL_SECS: u64 = 30;
-const MAX_BUFFER_SIZE: usize = 100_000; // Limit total events across all tables to prevent OOM
+const BATCH_SIZE: usize = 5_000;
+const FLUSH_INTERVAL_SECS: u64 = 10;
+const MAX_BUFFER_SIZE: usize = 20_000; // Safe limit for 512MB RAM
 
 pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapResult<()> {
     // Limit concurrent flush tasks to prevent unbounded spawning during spikes
@@ -267,12 +263,20 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
     let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(FLUSH_INTERVAL_SECS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Timer untuk metrics realtime (setiap 1 detik)
+    let mut metrics_ticker = tokio::time::interval(tokio::time::Duration::from_secs(1));
+    metrics_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut total_processed: u64 = 0;
+    let mut last_processed: u64 = 0;
+
     loop {
         tokio::select! {
             // Event baru masuk dari worker
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Some(event) => {
+                        total_processed += 1;
                         let key = format!("{}.{}", event.db_name, event.table_name);
 
                         // Circuit Breaker: prevent OOM by dropping the LARGEST buffer,
@@ -303,6 +307,7 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
                     }
                     None => {
                         // Channel closed — flush sisa buffer semua tabel lalu exit
+                        println!(); // Pindah baris dari log realtime
                         info!("📭 Channel closed, flushing remaining buffers...");
                         // total_events will be zero after loop breaks; no need to update
                         for (key, rows) in buffers.drain().filter(|(_, rows)| !rows.is_empty()) {
@@ -319,6 +324,18 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
                     let rows = std::mem::take(buf);
                     total_events -= rows.len();
                     spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), key.clone(), rows);
+                }
+            }
+
+            // Metrics Reporting 1 Detik
+            _ = metrics_ticker.tick() => {
+                let rps = total_processed - last_processed;
+                last_processed = total_processed;
+
+                // Print normally instead of \r, because \r often gets swallowed by Docker logs
+                if rps > 0 || total_events > 0 {
+                    info!("📊 [binlog-tap] Processed: {} rows | Speed: {} rows/sec | Pending Buffer: {} rows",
+                        total_processed, rps, total_events);
                 }
             }
 
@@ -357,7 +374,8 @@ fn spawn_flush_task(
     });
 }
 
-/// Flush satu tabel ke destination (saat ini: print, nanti: ClickHouse)
-async fn flush_table(table: String, rows: Vec<CdcEvent>) {
-    info!("🚀 [writer] Flushing {} rows ke {}", rows.len(), table);
+/// Flush satu tabel ke destination (saat ini: sink database ClickHouse)
+async fn flush_table(_table: String, _rows: Vec<CdcEvent>) {
+    // Pada sink / clickhouse implementasi:
+    // Insert _rows ke _table
 }
