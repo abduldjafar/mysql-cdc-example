@@ -9,10 +9,61 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      # Mounting konfigurasi custom
       - ./my.cnf:/etc/mysql/conf.d/my.cnf
-      # Persistence data agar tidak hilang saat container dihapus
       - mysql_data:/var/lib/mysql
+
+  zookeeper:
+    image: zookeeper:3.8
+    container_name: zookeeper
+    restart: always
+    ports:
+      - "2181:2181"
+
+  clickhouse-01:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse-01
+    restart: always
+    environment:
+      CLICKHOUSE_DB: fintech_db
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: rootpassword
+    ports:
+      - "8123:8123" # HTTP Node 1
+      - "9000:9000" # TCP Node 1 (Rust Client Primary)
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    volumes:
+      - clickhouse_01_data:/var/lib/clickhouse
+      - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml
+      - ./macros-01.xml:/etc/clickhouse-server/config.d/macros.xml
+    depends_on:
+      - zookeeper
+
+  clickhouse-02:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse-02
+    restart: always
+    environment:
+      CLICKHOUSE_DB: fintech_db
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: rootpassword
+    ports:
+      - "8124:8123" # HTTP Node 2
+      - "9001:9000" # TCP Node 2 (Rust Client Fallback)
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    volumes:
+      - clickhouse_02_data:/var/lib/clickhouse
+      - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml
+      - ./macros-02.xml:/etc/clickhouse-server/config.d/macros.xml
+    depends_on:
+      - zookeeper
 
 volumes:
   mysql_data:
+  clickhouse_01_data:
+  clickhouse_02_data:

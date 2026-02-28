@@ -1,0 +1,7 @@
+<clickhouse>
+    <macros>
+        <cluster>fintech_cluster</cluster>
+        <shard>1</shard>
+        <replica>replica_1</replica>
+    </macros>
+</clickhouse>
