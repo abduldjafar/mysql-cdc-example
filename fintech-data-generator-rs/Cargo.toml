@@ -1,0 +1,17 @@
+[package]
+name = "fintech-data-generator-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.44"
+colored = "3.1.1"
+dialoguer = "0.12.0"
+fake = "4.4.0"
+futures = "0.3.32"
+rand = "0.10.0"
+rust_decimal = { version = "1.40.0", features = ["std", "serde", "maths"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "mysql", "chrono", "uuid", "rust_decimal"] }
+tokio = { version = "1.49.0", features = ["full"] }
+url = "2.5.8"
+uuid = { version = "1.21.0", features = ["v4"] }

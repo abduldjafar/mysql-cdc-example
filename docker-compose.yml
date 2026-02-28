@@ -63,6 +63,26 @@ services:
     depends_on:
       - zookeeper
 
+  binlog-tap:
+    build:
+      context: ./binlog-tap
+      dockerfile: Dockerfile
+    container_name: binlog-tap
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+    volumes:
+      - ./binlog-tap/table_config.toml:/app/table_config.toml:ro
+    depends_on:
+      - mysql-cdc
+      - clickhouse-01
+      - clickhouse-02
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
 volumes:
   mysql_data:
   clickhouse_01_data:

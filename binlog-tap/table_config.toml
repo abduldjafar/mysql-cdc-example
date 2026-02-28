@@ -1,6 +1,6 @@
 [[databases]]
 name = "fintech_db"
-url = "mysql://root:rootpassword@localhost:3306"
+url = "mysql://root:rootpassword@mysql-cdc:3306"
 server_id = 2
 exclude_tables = ["migrations", "audit_logs"]
 
@@ -15,6 +15,6 @@ exclude_tables = ["migrations", "audit_logs"]
 
 [[databases]]
 name = "ecommerce_db"
-url = "mysql://root:rootpassword@localhost:3306"
+url = "mysql://root:rootpassword@mysql-cdc:3306"
 server_id = 3
 exclude_tables = ["migrations", "audit_logs"]
