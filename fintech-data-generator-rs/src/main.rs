@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "mysql://root:rootpassword@localhost:3306/fintech_db".to_string());
         
     let pool = MySqlPoolOptions::new()
-        .max_connections(20)
+        .max_connections(100)
         .connect(&db_url)
         .await?;
 
