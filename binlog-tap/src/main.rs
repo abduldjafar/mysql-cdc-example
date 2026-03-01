@@ -46,12 +46,12 @@ async fn main() -> BinlogTapResult<()> {
 
                 snapshot_columns(&pool, &db.name, &mut name_to_columns).await?;
                 info!(
-                    "📊 [binlog-tap] {} tables dimuat dari {}",
+                    "[binlog-tap] {} tables dimuat dari {}",
                     name_to_columns.len(),
                     db.name
                 );
 
-                info!("🔴 [binlog-tap] Binlog stream dimulai untuk {}...", db.name);
+                info!("[binlog-tap] Binlog stream dimulai untuk {}...", db.name);
                 process_binlog_stream_zero_copy(
                     &pool,
                     db.server_id,
@@ -71,14 +71,14 @@ async fn main() -> BinlogTapResult<()> {
 
     for thread in threads_conn {
         match thread.await {
-            Ok(Err(e)) => error!("❌ Worker thread failed: {}", e),
-            Err(e) => error!("❌ Worker task panicked/failed to join: {}", e),
+            Ok(Err(e)) => error!("Worker thread failed: {}", e),
+            Err(e) => error!("Worker task panicked/failed to join: {}", e),
             _ => {}
         }
     }
 
     if let Err(e) = writer_handle.await {
-        error!("❌ Writer task failed to join: {}", e);
+        return Err(e.into());
     }
 
     Ok(())
@@ -135,7 +135,7 @@ async fn process_binlog_stream_zero_copy(
                     if let EventData::TableMapEvent(table_map) = event_data {
                         let table_id = table_map.table_id();
                         debug!(
-                            "📋 [binlog-tap] Cached table: {}.{} (id: {})",
+                            "[binlog-tap] Cached table: {}.{} (id: {})",
                             table_map.database_name(),
                             table_map.table_name(),
                             table_id
@@ -210,7 +210,6 @@ async fn process_binlog_stream_zero_copy(
                                     }
                                     Ok((_before, None)) => {} // DELETE
                                     Err(e) => {
-                                        error!("❌ [binlog-tap] Error parsing row: {}", e);
                                         return Err(e.into());
                                     }
                                 }
@@ -220,7 +219,6 @@ async fn process_binlog_stream_zero_copy(
                 }
             }
             Err(e) => {
-                eprintln!("❌ [binlog-tap] Error reading binlog event: {}", e);
                 return Err(e.into());
             }
         }
@@ -271,7 +269,7 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
                             if let Some(drop_key) = largest_key {
                                 if let Some(dropped) = buffers.remove(&drop_key) {
                                     total_events -= dropped.len();
-                                    warn!("⚠️ [binlog-tap] Memory limit reached. Dropped {} events from '{}'", dropped.len(), drop_key);
+                                    warn!("[binlog-tap] Memory limit reached. Dropped {} events from '{}'", dropped.len(), drop_key);
                                 }
                             }
                         }
@@ -288,9 +286,9 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
                     }
                     None => {
                         println!();
-                        info!("📭 Channel closed, flushing remaining buffers...");
+                        info!("Channel closed, flushing remaining buffers...");
                         for (key, rows) in buffers.drain().filter(|(_, rows)| !rows.is_empty()) {
-                            32(&mut flush_tasks, Arc::clone(&semaphore), key, rows);
+                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), key, rows);
                         }
                         break;
                     }
@@ -317,7 +315,7 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
 
             Some(result) = flush_tasks.join_next() => {
                 if let Err(e) = result {
-                    error!("❌ [writer] Flush task panicked: {}", e);
+                    return Err(e.into());
                 }
             }
         }
@@ -325,7 +323,7 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
 
     while let Some(result) = flush_tasks.join_next().await {
         if let Err(e) = result {
-            error!("❌ [writer] Flush task panicked during shutdown: {}", e);
+            return Err(e.into());
         }
     }
 
