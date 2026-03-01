@@ -1,102 +1,82 @@
-Berikut adalah file `README.md` yang lengkap, profesional, dan siap pakai untuk proyek MySQL CDC Anda. File ini disusun agar mudah dipahami oleh developer lain atau untuk dokumentasi pribadi Anda.
+# High-Performance MySQL CDC (Change Data Capture) Stack
 
-```markdown
-# MySQL CDC (Change Data Capture) Setup
+This repository provides a comprehensive and highly optimized Docker Compose setup for testing and running a powerful **Change Data Capture (CDC)** environment on **MySQL 8.0**. It is bundled with two custom-built, extreme-performance Rust applications to generate data and replicate binlog events at massive scale (>100K TPS).
 
-Repositori ini berisi konfigurasi Docker untuk menjalankan instance **MySQL 8.0** yang sudah dioptimalkan untuk proses **Change Data Capture (CDC)**. Setup ini kompatibel dengan alat-alat data modern seperti Debezium, Flink CDC, Airbyte, atau integrasi langsung ke **Apache Iceberg**.
+## 🚀 Repository Components
 
-## 🚀 Fitur Utama
-* **Binary Logging Aktif**: Menggunakan format `ROW` untuk tracking perubahan data yang presisi.
-* **Persistent Data**: Menggunakan Docker volumes agar data tidak hilang saat container dihapus.
-* **Security Ready**: Dilengkapi dengan script pembuatan user khusus CDC dengan permission minimal.
+This stack consists of three main components:
+
+1. **MySQL 8.0 CDC Container**: Pre-configured with optimal `my.cnf` settings for ROW-based binary logging, ready for external CDC connectors (e.g., Debezium, Flink CDC, Airbyte) or immediate tap replication.
+2. **`fintech-data-generator-rs`**: A heavily concurrent, asynchronous Rust application that generates millions of realistic dummy fintech transactions (Users, Wallets, Topups, Transactions) in seconds using `sqlx::QueryBuilder` bulk inserts and Tokio Tasks.
+3. **`binlog-tap`**: A blazingly fast Rust CDC consumer that connects to the MySQL binlog replication stream, parses events in real-time, and batches them efficiently into memory using zero-copy principles. It acts as an integration layer to route database mutations extremely fast to downstream data warehouses (like ClickHouse) or data lakes.
 
 ---
 
-## 🛠️ Persiapan & Instalasi
+## 🛠️ Prerequisites & Installation
 
-### 1. Prasyarat
-* Docker dan Docker Compose sudah terinstal di mesin Anda.
+### Requirements
+* Docker and Docker Compose
+* Rust & Cargo (If you wish to run the generators outside of Docker)
 
-### 2. Struktur Folder
-Pastikan file berikut berada dalam satu direktori:
-* `docker-compose.yml`
-* `my.cnf` (File konfigurasi MySQL)
+### Running the Stack
+Ensure you are in the root directory containing the `docker-compose.yml` file, then start the services:
 
-### 3. Menjalankan MySQL
-Gunakan perintah berikut untuk menyalakan container:
 ```bash
 docker-compose up -d
-
 ```
+*Depending on your `docker-compose.yml`, this will spin up MySQL and the `binlog-tap` service.*
 
 ---
 
-## ⚙️ Konfigurasi Teknis
+## ⚡ Generating Data (`fintech-data-generator-rs`)
 
-### Parameter Binlog (`my.cnf`)
+To flood the database with millions of rows for high-throughput architectural testing, use the included Rust data generator.
 
-Untuk mendukung CDC, parameter berikut telah diaktifkan di dalam `my.cnf`:
-| Parameter | Nilai | Deskripsi |
-| :--- | :--- | :--- |
-| `server-id` | `1` | Identitas unik server dalam topologi replikasi. |
-| `binlog_format` | `ROW` | Mencatat perubahan data per baris (Wajib untuk CDC). |
-| `binlog_row_image` | `FULL` | Menyimpan data lama dan baru dalam log. |
-| `expire_logs_days` | `7` | Menghapus log otomatis setelah 7 hari untuk menghemat storage. |
-
----
-
-## 🔍 Verifikasi Status CDC
-
-Setelah container berjalan, pastikan konfigurasi sudah aktif dengan menjalankan perintah berikut:
-
-1. **Masuk ke MySQL CLI:**
+1. Navigate to the generator directory:
 ```bash
-docker exec -it mysql-cdc mysql -u root -prootpassword
-
+cd fintech-data-generator-rs
 ```
-
-
-2. **Jalankan Query Cek Status:**
-```sql
--- Cek apakah binlog aktif (Harus muncul "ON")
-SELECT @@log_bin;
-
--- Cek format log (Harus muncul "ROW")
-SELECT @@binlog_format;
-
+2. Run the interactive CLI (Wait for compilation if running the first time):
+```bash
+cargo run --release
 ```
+*(Optionally provide `DATABASE_URL` as an environment variable if not connecting to your local Docker container)*
 
-
+3. Follow the CLI prompts to select "Batch" or "Live Streaming", set your desired scale (Small/Medium/Large), and watch it insert upwards of hundreds of thousands of records per second.
 
 ---
 
-## 👤 Setup User CDC
+## ⚙️ MySQL Configuration (`my.cnf`) Details
 
-Jangan gunakan user `root` untuk aplikasi CDC eksternal. Gunakan user khusus dengan akses terbatas:
+To support precise CDC tracking, this environment forces the following flags in MySQL:
 
-```sql
-CREATE USER 'cdc_user'@'%' IDENTIFIED BY 'cdc_password';
-GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'cdc_user'@'%';
-FLUSH PRIVILEGES;
+| Parameter | Value | Description |
+| :--- | :--- | :--- |
+| `server-id` | `1` | Unique server identity in the replication topology. |
+| `binlog_format` | `ROW` | Logs exact row changes rather than raw SQL statements (Mandatory for CDC). |
+| `binlog_row_image` | `FULL` | Ensures both old and new data states are preserved in the log. |
+| `expire_logs_days` | `7` | Auto-purges logs after 7 days to preserve disk space. |
 
+### Verifying CDC Status
+
+If you want to manually verify the binlog configuration inside the MySQL container:
+
+```bash
+docker exec -it mysql-cdc mysql -u root -prootpassword -e "SELECT @@log_bin, @@binlog_format;"
 ```
+*Both `log_bin` (ON) and `binlog_format` (ROW) must be set correctly.*
 
 ---
 
-## 🏗️ Integrasi Berikutnya (Roadmap)
+## 🏗️ Downstream Integrations (Roadmap)
 
-Data dari MySQL ini siap dialirkan menuju:
+Data captured from this high-speed MySQL pipeline is primed to flow into modern analytical stores:
 
-1. **Apache Iceberg**: Untuk Modern Data Lakehouse menggunakan Flink CDC.
-2. **Kafka**: Menggunakan Debezium Connector.
-3. **Analytics**: Sinkronisasi real-time ke warehouse atau data lake.
+1. **Apache Iceberg / ClickHouse**: Utilizing the bundled `binlog-tap` to parse ROW events and flush them into OLAP databases in real-time.
+2. **Kafka**: Standard Debezium Connector routing.
+3. **Machine Learning Pipelines**: Continuous, sub-second latency data feeds for realtime transaction ML models.
 
 ---
 
-**Author:** Abdul Djafar
-
+**Author:** Abdul Djafar  
 **Project:** Data Engineering Pipeline
-
-```
-
-
