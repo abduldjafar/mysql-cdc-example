@@ -288,10 +288,11 @@ pub async fn writer(
                                 .iter()
                                 .max_by_key(|(_, v)| v.len())
                                 .map(|(k, _)| k.clone());
-                            if let Some(drop_key) = largest_key {
-                                if let Some(dropped) = buffers.remove(&drop_key) {
-                                    total_events -= dropped.len();
-                                    warn!("[binlog-tap] Memory limit reached. Dropped {} events from '{}'", dropped.len(), drop_key);
+                            if let Some(flush_key) = largest_key {
+                                if let Some(ready_rows) = buffers.remove(&flush_key) {
+                                    total_events -= ready_rows.len();
+                                    warn!("[binlog-tap] ⚠️ Memory limit ({} rows) reached! Force-flushing {} events from '{}' early...", args.max_buffer_size, ready_rows.len(), flush_key);
+                                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), flush_key, ready_rows);
                                 }
                             }
                         }
