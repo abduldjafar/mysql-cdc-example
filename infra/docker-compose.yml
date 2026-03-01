@@ -71,6 +71,7 @@ services:
     restart: unless-stopped
     environment:
       RUST_LOG: info
+    command: [ "--batch-size", "50000", "--max-buffer-size", "100000", "--flush-interval-secs", "1" ]
     volumes:
       - ../binlog-tap/table_config.toml:/app/table_config.toml:ro
     depends_on:
