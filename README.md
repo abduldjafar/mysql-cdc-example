@@ -19,9 +19,10 @@ This stack consists of three main components:
 * Rust & Cargo (If you wish to run the generators outside of Docker)
 
 ### Running the Stack
-Ensure you are in the root directory containing the `docker-compose.yml` file, then start the services:
+Ensure you are in the `infra/` directory containing the `docker-compose.yml` file, then start the services:
 
 ```bash
+cd infra
 docker-compose up -d
 ```
 *Depending on your `docker-compose.yml`, this will spin up MySQL and the `binlog-tap` service.*

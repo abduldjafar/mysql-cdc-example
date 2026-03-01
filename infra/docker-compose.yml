@@ -65,14 +65,14 @@ services:
 
   binlog-tap:
     build:
-      context: ./binlog-tap
+      context: ../binlog-tap
       dockerfile: Dockerfile
     container_name: binlog-tap
     restart: unless-stopped
     environment:
       RUST_LOG: info
     volumes:
-      - ./binlog-tap/table_config.toml:/app/table_config.toml:ro
+      - ../binlog-tap/table_config.toml:/app/table_config.toml:ro
     depends_on:
       - mysql-cdc
       - clickhouse-01
