@@ -8,6 +8,7 @@
 use binlog_tap::config::{CdcConfig, CdcEvent, EventType};
 use binlog_tap::errors::Result as BinlogTapResult;
 use binlog_tap::zero_copy::{CdcColumnRef, CdcEventRef, CdcValueRef};
+use clap::Parser;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use mysql_async::binlog::events::{EventData, TableMapEvent};
@@ -15,6 +16,22 @@ use mysql_async::prelude::*;
 use mysql_async::{BinlogStreamRequest, Pool};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Parser, Debug, Clone)]
+#[command(version, about, long_about = None)]
+pub struct Args {
+    /// Number of CDC events to batch before flushing
+    #[arg(long, default_value_t = 50000)]
+    pub batch_size: usize,
+
+    /// Maximum events to keep in memory queue across all tables
+    #[arg(long, default_value_t = 100000)]
+    pub max_buffer_size: usize,
+
+    /// Maximum time in seconds to wait before flushing incomplete batches
+    #[arg(long, default_value_t = 30)]
+    pub flush_interval_secs: u64,
+}
 
 pub struct TableMetadata {
     pub map_event: TableMapEvent<'static>,
@@ -26,6 +43,8 @@ pub struct TableMetadata {
 #[tokio::main]
 async fn main() -> BinlogTapResult<()> {
     env_logger::init();
+    let args = Args::parse();
+
     let config_path =
         std::env::var("BINLOG_TAP_CONFIG").unwrap_or_else(|_| "table_config.toml".to_string());
 
@@ -34,7 +53,10 @@ async fn main() -> BinlogTapResult<()> {
     let mut threads_conn: Vec<tokio::task::JoinHandle<BinlogTapResult<()>>> = Vec::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<CdcEvent>(10000);
 
-    let writer_handle = tokio::spawn(async move { writer(rx).await });
+    let writer_handle = tokio::spawn({
+        let args = args.clone();
+        async move { writer(rx, args).await }
+    });
 
     for db in table_config.databases {
         let worker_handle = tokio::spawn({
@@ -231,11 +253,10 @@ async fn process_binlog_stream_zero_copy(
     Ok(())
 }
 
-const BATCH_SIZE: usize = 500000;
-const FLUSH_INTERVAL_SECS: u64 = 30; // Flush every 1 second instead of 10
-const MAX_BUFFER_SIZE: usize = 100000;
-
-pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapResult<()> {
+pub async fn writer(
+    mut rx: tokio::sync::mpsc::Receiver<CdcEvent>,
+    args: Args,
+) -> BinlogTapResult<()> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
     let mut flush_tasks = tokio::task::JoinSet::new();
 
@@ -244,7 +265,8 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
 
     let mut total_events: usize = 0;
 
-    let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(FLUSH_INTERVAL_SECS));
+    let mut ticker =
+        tokio::time::interval(tokio::time::Duration::from_secs(args.flush_interval_secs));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut metrics_ticker = tokio::time::interval(tokio::time::Duration::from_secs(1));
@@ -261,7 +283,7 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
                         total_processed += 1;
                         let key = format!("{}.{}", event.db_name, event.table_name);
 
-                        if total_events >= MAX_BUFFER_SIZE {
+                        if total_events >= args.max_buffer_size {
                             let largest_key = buffers
                                 .iter()
                                 .max_by_key(|(_, v)| v.len())
@@ -278,7 +300,7 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
                         buf.push(event);
                         total_events += 1;
 
-                        if buf.len() >= BATCH_SIZE {
+                        if buf.len() >= args.batch_size {
                             let rows = std::mem::take(buf);
                             total_events -= rows.len();
                             spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), key, rows);
