@@ -233,7 +233,7 @@ async fn process_binlog_stream_zero_copy(
 
 const BATCH_SIZE: usize = 500000;
 const FLUSH_INTERVAL_SECS: u64 = 30; // Flush every 1 second instead of 10
-const MAX_BUFFER_SIZE: usize = 1000000;
+const MAX_BUFFER_SIZE: usize = 100000;
 
 pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapResult<()> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
