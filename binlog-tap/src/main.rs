@@ -308,7 +308,7 @@ pub async fn writer(mut rx: tokio::sync::mpsc::Receiver<CdcEvent>) -> BinlogTapR
                 last_processed = total_processed;
 
                 if rps > 0 || total_events > 0 {
-                    info!("📊 [binlog-tap] Processed: {} rows | Speed: {} rows/sec | Pending: {}",
+                    info!("[binlog-tap] Processed: {} rows | Speed: {} rows/sec | Pending: {}",
                         total_processed, rps, total_events);
                 }
             }
