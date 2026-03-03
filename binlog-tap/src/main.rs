@@ -168,6 +168,11 @@ async fn process_binlog_stream_zero_copy(
                 if let Some(event_data) = event.read_data()? {
                     if let EventData::TableMapEvent(table_map) = event_data {
                         let table_id = table_map.table_id();
+
+                        // Skip if we already cached this table_id — avoids re-resolving on every event
+                        if table_metadata.contains_key(&table_id) {
+                            continue;
+                        }
                         debug!(
                             "[binlog-tap] Cached table: {}.{} (id: {})",
                             table_map.database_name(),
