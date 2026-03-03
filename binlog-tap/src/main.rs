@@ -31,6 +31,18 @@ pub struct Args {
     /// Maximum time in seconds to wait before flushing incomplete batches
     #[arg(long, default_value_t = 30)]
     pub flush_interval_secs: u64,
+
+    /// ClickHouse HTTP URL endpoint
+    #[arg(long, default_value_t = String::from("http://localhost:8123"))]
+    pub clickhouse_url: String,
+
+    /// ClickHouse Username
+    #[arg(long, default_value_t = String::from("default"))]
+    pub clickhouse_user: String,
+
+    /// ClickHouse Password
+    #[arg(long, default_value_t = String::from(""))]
+    pub clickhouse_pass: String,
 }
 
 pub struct TableMetadata {
@@ -126,7 +138,7 @@ async fn snapshot_columns(
         let key = format!("{}.{}", db_name, table_name);
         name_to_columns
             .entry(key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(Arc::from(column_name.as_str()));
     }
 
@@ -260,6 +272,14 @@ pub async fn writer(
     let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
     let mut flush_tasks = tokio::task::JoinSet::new();
 
+    let http_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(20)
+        .build()
+        .expect("Failed to build HTTP Client");
+
+    let shared_args = Arc::new(args.clone());
+    let known_tables = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+
     let mut buffers: std::collections::HashMap<String, Vec<CdcEvent>> =
         std::collections::HashMap::new();
 
@@ -288,13 +308,12 @@ pub async fn writer(
                                 .iter()
                                 .max_by_key(|(_, v)| v.len())
                                 .map(|(k, _)| k.clone());
-                            if let Some(flush_key) = largest_key {
-                                if let Some(ready_rows) = buffers.remove(&flush_key) {
+                            if let Some(flush_key) = largest_key
+                                && let Some(ready_rows) = buffers.remove(&flush_key) {
                                     total_events -= ready_rows.len();
                                     warn!("[binlog-tap] ⚠️ Memory limit ({} rows) reached! Force-flushing {} events from '{}' early...", args.max_buffer_size, ready_rows.len(), flush_key);
-                                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), flush_key, ready_rows);
+                                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), flush_key, ready_rows);
                                 }
-                            }
                         }
 
                         let buf = buffers.entry(key.clone()).or_default();
@@ -304,14 +323,14 @@ pub async fn writer(
                         if buf.len() >= args.batch_size {
                             let rows = std::mem::take(buf);
                             total_events -= rows.len();
-                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), key, rows);
+                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), key, rows);
                         }
                     }
                     None => {
                         println!();
                         info!("Channel closed, flushing remaining buffers...");
                         for (key, rows) in buffers.drain().filter(|(_, rows)| !rows.is_empty()) {
-                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), key, rows);
+                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), key, rows);
                         }
                         break;
                     }
@@ -322,7 +341,7 @@ pub async fn writer(
                 for (key, buf) in buffers.iter_mut().filter(|(_, v)| !v.is_empty()) {
                     let rows = std::mem::take(buf);
                     total_events -= rows.len();
-                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), key.clone(), rows);
+                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), key.clone(), rows);
                 }
             }
 
@@ -356,6 +375,9 @@ pub async fn writer(
 fn spawn_flush_task(
     tasks: &mut tokio::task::JoinSet<()>,
     semaphore: Arc<tokio::sync::Semaphore>,
+    client: reqwest::Client,
+    args: Arc<Args>,
+    known_tables: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     key: String,
     rows: Vec<CdcEvent>,
 ) {
@@ -364,23 +386,132 @@ fn spawn_flush_task(
             .acquire()
             .await
             .expect("Semaphore closed unexpectedly");
-        flush_table(key, rows).await;
+
+        if let Err(e) = flush_table(client, args, known_tables, key, rows).await {
+            error!("❌ [flush] ClickHouse Insert Failed: {}", e);
+        }
     });
 }
 
-async fn flush_table(table: String, rows: Vec<CdcEvent>) {
+async fn flush_table(
+    client: reqwest::Client,
+    args: Arc<Args>,
+    known_tables: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    table: String,
+    rows: Vec<CdcEvent>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let row_count = rows.len();
 
-    // For 500K/sec throughput, flush must be instant
-    // TODO: Replace with actual ClickHouse client
-    info!("[flush] Flushing {} rows to table: {}", row_count, table);
+    // 0. Super-fast in-memory cache to verify if Table Exists
+    {
+        let cache = known_tables.read().await;
+        if !cache.contains(&table) {
+            drop(cache); // Release read lock to allow network query
 
-    // Real ClickHouse insert would go here:
-    // clickhouse_client.insert(&table, rows).await?;
+            let check_url = format!("{}/?query=EXISTS%20{}", args.clickhouse_url, table);
+            let mut check_req = client.get(&check_url);
 
-    // Rows dropped here → memory freed instantly!
-    debug!(
-        "[flush] Successfully flushed {} rows to {}",
+            if !args.clickhouse_user.is_empty() {
+                check_req =
+                    check_req.basic_auth(&args.clickhouse_user, Some(&args.clickhouse_pass));
+            }
+
+            let res = check_req.send().await?;
+            let is_exists_text = res.text().await?.trim().to_string();
+
+            if is_exists_text == "0" {
+                warn!(
+                    "[flush] ⚠️ Table '{}' does not exist in ClickHouse! Skipping {} rows to prevent crash.",
+                    table, row_count
+                );
+                return Ok(());
+            }
+
+            // Valid! Cache it so we never make this EXISTS HTTP request again for this table
+            let mut write_cache = known_tables.write().await;
+            write_cache.insert(table.clone());
+        }
+    }
+
+    // 1. Build a Stream of Bytes mapped from the Vec<CdcEvent> directly
+    // This PREVENTS out of memory string allocation! The HTTP client will stream chunks.
+    use binlog_tap::config::CdcValue;
+
+    let stream_rows = futures::stream::iter(rows).map(move |row| {
+        let mut row_str = String::with_capacity(256);
+        row_str.push('{');
+        for (i, col) in row.columns.iter().enumerate() {
+            if i > 0 {
+                row_str.push(',');
+            }
+
+            // Serialize Key safely
+            row_str.push_str(&serde_json::to_string(col.name.as_ref()).unwrap());
+            row_str.push(':');
+
+            // Serialize Value safely based on Enum
+            match &col.value {
+                CdcValue::Null => row_str.push_str("null"),
+                CdcValue::Bool(v) => row_str.push_str(if *v { "true" } else { "false" }),
+                CdcValue::Int(v) => {
+                    use std::fmt::Write;
+                    write!(row_str, "{}", v).unwrap();
+                }
+                CdcValue::Uint(v) => {
+                    use std::fmt::Write;
+                    write!(row_str, "{}", v).unwrap();
+                }
+                CdcValue::Float(v) => {
+                    use std::fmt::Write;
+                    write!(row_str, "{}", v).unwrap();
+                }
+                CdcValue::Decimal(v) => row_str.push_str(&serde_json::to_string(v).unwrap()),
+                CdcValue::String(v) => row_str.push_str(&serde_json::to_string(v).unwrap()),
+                CdcValue::Bytes(v) => {
+                    let lossy = String::from_utf8_lossy(v);
+                    row_str.push_str(&serde_json::to_string(lossy.as_ref()).unwrap());
+                }
+                CdcValue::Json(v) => row_str.push_str(v),
+                CdcValue::Uuid(v) => row_str.push_str(&serde_json::to_string(v).unwrap()),
+                CdcValue::Date(v) => row_str.push_str(&serde_json::to_string(v).unwrap()),
+                CdcValue::Time(v) => row_str.push_str(&serde_json::to_string(v).unwrap()),
+                CdcValue::DateTime(v) => row_str.push_str(&serde_json::to_string(v).unwrap()),
+            }
+        }
+        row_str.push('}');
+        row_str.push('\n'); // Required delimiter for JSONEachRow!
+
+        Ok::<bytes::Bytes, std::convert::Infallible>(bytes::Bytes::from(row_str))
+    });
+
+    // 2. Build the ClickHouse Target URL dynamically safely
+    let target_url = format!(
+        "{}/?query=INSERT%20INTO%20{}%20FORMAT%20JSONEachRow",
+        args.clickhouse_url, table
+    );
+
+    // 3. Send blazing fast HTTP POST
+    let mut request = client.post(&target_url);
+
+    // Add Basic Auth if provided
+    if !args.clickhouse_user.is_empty() {
+        request = request.basic_auth(&args.clickhouse_user, Some::<&str>(&args.clickhouse_pass));
+    }
+
+    let response = request
+        .body(reqwest::Body::wrap_stream(stream_rows))
+        .send()
+        .await?;
+
+    // 4. Validate insertion accuracy
+    if !response.status().is_success() {
+        let err_text = response.text().await.unwrap_or_default();
+        return Err(format!("ClickHouse HTTP Error: {}", err_text).into());
+    }
+
+    info!(
+        "[flush] ✅ Successfully flushed {} rows to {}",
         row_count, table
     );
+    Ok(())
 }

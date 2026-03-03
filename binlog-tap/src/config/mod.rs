@@ -78,13 +78,16 @@ impl EventType {
             _ => panic!("Unsupported event type"),
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
-        match self {
-            EventType::Insert => "INSERT".to_string(),
-            EventType::Update => "UPDATE".to_string(),
-            EventType::Delete => "DELETE".to_string(),
-        }
+impl std::fmt::Display for EventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            EventType::Insert => "INSERT",
+            EventType::Update => "UPDATE",
+            EventType::Delete => "DELETE",
+        };
+        write!(f, "{}", s)
     }
 }
 impl CdcValue {
