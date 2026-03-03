@@ -170,16 +170,20 @@ async fn process_binlog_stream_zero_copy(
                 if let Some(event_data) = event.read_data()? {
                     if let EventData::TableMapEvent(table_map) = event_data {
                         // Skip internal MySQL databases to prevent ClickHouse sink errors
-                        let db_name_str = table_map.database_name();
+                        let db_name_raw = table_map.database_name();
+                        let db_name_str = db_name_raw.trim_end_matches('\0');
+                        let table_name_raw = table_map.table_name();
+                        let table_name_str = table_name_raw.trim_end_matches('\0');
+
                         if matches!(
-                            db_name_str.as_ref(),
+                            db_name_str,
                             "mysql" | "information_schema" | "performance_schema" | "sys"
                         ) {
                             continue;
                         }
 
                         let table_id = table_map.table_id();
-                        let full_table_name = format!("{}.{}", db_name_str, table_map.table_name());
+                        let full_table_name = format!("{}.{}", db_name_str, table_name_str);
 
                         // Fast path: if we already resolved columns for this table NAME, reuse them
                         let columns = if let Some(cached) = resolved_columns.get(&full_table_name) {
@@ -239,10 +243,7 @@ async fn process_binlog_stream_zero_copy(
                                         match fallback_conn
                                             .exec::<String, _, _>(
                                                 query,
-                                                (
-                                                    table_map.database_name().as_ref(),
-                                                    table_map.table_name().as_ref(),
-                                                ),
+                                                (db_name_str, table_name_str),
                                             )
                                             .await
                                         {
@@ -298,8 +299,8 @@ async fn process_binlog_stream_zero_copy(
                             cols
                         };
 
-                        let db_name: Arc<str> = Arc::from(table_map.database_name());
-                        let table_name: Arc<str> = Arc::from(table_map.table_name());
+                        let db_name: Arc<str> = Arc::from(db_name_str);
+                        let table_name: Arc<str> = Arc::from(table_name_str);
 
                         table_metadata.insert(
                             table_id,

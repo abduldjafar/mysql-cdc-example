@@ -4,6 +4,8 @@ pub async fn setup_database(pool: &MySqlPool, reset: bool) -> Result<(), sqlx::E
     if reset {
         println!("🧨 Resetting database schema...");
         sqlx::query("SET FOREIGN_KEY_CHECKS = 0").execute(pool).await?;
+        sqlx::query("SET SESSION binlog_row_metadata = FULL").execute(pool).await?;
+        sqlx::query("SET SESSION binlog_row_image = FULL").execute(pool).await?;
         
         let tables = [
             "transaction_vouchers", "transaction_items", "transactions", 
