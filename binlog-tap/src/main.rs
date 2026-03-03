@@ -227,33 +227,57 @@ async fn process_binlog_stream_zero_copy(
                             }
 
                             // Tier 3: Query INFORMATION_SCHEMA (network fallback)
-                            if cols.is_empty()
-                                && let Ok(mut fallback_conn) = pool.get_conn().await
-                            {
-                                let query = r#"
-                                    SELECT COLUMN_NAME
-                                    FROM INFORMATION_SCHEMA.COLUMNS
-                                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-                                    ORDER BY ORDINAL_POSITION
-                                "#;
-                                if let Ok(rows) = fallback_conn
-                                    .exec::<String, _, _>(
-                                        query,
-                                        (
-                                            table_map.database_name().as_ref(),
-                                            table_map.table_name().as_ref(),
-                                        ),
-                                    )
-                                    .await
-                                    && !rows.is_empty()
-                                {
-                                    info!(
-                                        "[binlog-tap] Fetched {} columns from INFORMATION_SCHEMA for {}",
-                                        rows.len(),
-                                        full_table_name
-                                    );
-                                    cols =
-                                        rows.into_iter().map(|c| Arc::from(c.as_str())).collect();
+                            if cols.is_empty() {
+                                match pool.get_conn().await {
+                                    Ok(mut fallback_conn) => {
+                                        let query = r#"
+                                            SELECT COLUMN_NAME
+                                            FROM INFORMATION_SCHEMA.COLUMNS
+                                            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                                            ORDER BY ORDINAL_POSITION
+                                        "#;
+                                        match fallback_conn
+                                            .exec::<String, _, _>(
+                                                query,
+                                                (
+                                                    table_map.database_name().as_ref(),
+                                                    table_map.table_name().as_ref(),
+                                                ),
+                                            )
+                                            .await
+                                        {
+                                            Ok(rows) => {
+                                                if !rows.is_empty() {
+                                                    info!(
+                                                        "[binlog-tap] Fetched {} columns from INFORMATION_SCHEMA for {}",
+                                                        rows.len(),
+                                                        full_table_name
+                                                    );
+                                                    cols = rows
+                                                        .into_iter()
+                                                        .map(|c| Arc::from(c.as_str()))
+                                                        .collect();
+                                                } else {
+                                                    warn!(
+                                                        "[binlog-tap] INFORMATION_SCHEMA returned 0 rows for {}",
+                                                        full_table_name
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "[binlog-tap] Query to INFORMATION_SCHEMA failed for {}: {:?}",
+                                                    full_table_name, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "[binlog-tap] Failed to get fallback connection for {}: {:?}",
+                                            full_table_name, e
+                                        );
+                                    }
                                 }
                             }
 
