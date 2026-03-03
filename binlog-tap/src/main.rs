@@ -21,11 +21,11 @@ use std::sync::Arc;
 #[command(version, about, long_about = None)]
 pub struct Args {
     /// Number of CDC events to batch before flushing
-    #[arg(long, default_value_t = 50000)]
+    #[arg(long, default_value_t = 25000)]
     pub batch_size: usize,
 
     /// Maximum events to keep in memory queue across all tables
-    #[arg(long, default_value_t = 100000)]
+    #[arg(long, default_value_t = 50000)]
     pub max_buffer_size: usize,
 
     /// Maximum time in seconds to wait before flushing incomplete batches
@@ -169,9 +169,17 @@ async fn process_binlog_stream_zero_copy(
 
                 if let Some(event_data) = event.read_data()? {
                     if let EventData::TableMapEvent(table_map) = event_data {
+                        // Skip internal MySQL databases to prevent ClickHouse sink errors
+                        let db_name_str = table_map.database_name();
+                        if matches!(
+                            db_name_str.as_ref(),
+                            "mysql" | "information_schema" | "performance_schema" | "sys"
+                        ) {
+                            continue;
+                        }
+
                         let table_id = table_map.table_id();
-                        let full_table_name =
-                            format!("{}.{}", table_map.database_name(), table_map.table_name());
+                        let full_table_name = format!("{}.{}", db_name_str, table_map.table_name());
 
                         // Fast path: if we already resolved columns for this table NAME, reuse them
                         let columns = if let Some(cached) = resolved_columns.get(&full_table_name) {
@@ -498,7 +506,7 @@ async fn flush_table(
                 );
 
                 // Build dynamic schema from the first row
-                let mut create_query = format!("CREATE TABLE {} (", table);
+                let mut create_query = format!("CREATE TABLE IF NOT EXISTS {} (", table);
                 let first_row = &rows[0];
 
                 for (i, col) in first_row.columns.iter().enumerate() {
