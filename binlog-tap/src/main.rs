@@ -178,7 +178,7 @@ async fn process_binlog_stream_zero_copy(
                         let db_name: Arc<str> = Arc::from(table_map.database_name());
                         let table_name: Arc<str> = Arc::from(table_map.table_name());
 
-                        let columns = name_to_columns
+                        let mut columns = name_to_columns
                             .get(&format!(
                                 "{}.{}",
                                 table_map.database_name(),
@@ -186,6 +186,42 @@ async fn process_binlog_stream_zero_copy(
                             ))
                             .cloned()
                             .unwrap_or_default();
+
+                        // Fallback for tables created dynamically AFTER startup
+                        if columns.is_empty() {
+                            warn!(
+                                "[binlog-tap] ⚠️ Schema for {}.{} not found in startup cache. Fetching dynamically...",
+                                table_map.database_name(),
+                                table_map.table_name()
+                            );
+                            if let Ok(mut fallback_conn) = pool.get_conn().await {
+                                let query = r#"
+                                    SELECT COLUMN_NAME
+                                    FROM INFORMATION_SCHEMA.COLUMNS
+                                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                                    ORDER BY ORDINAL_POSITION
+                                "#;
+                                if let Ok(rows) = fallback_conn
+                                    .exec::<String, _, _>(
+                                        query,
+                                        (
+                                            table_map.database_name().as_ref(),
+                                            table_map.table_name().as_ref(),
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    columns =
+                                        rows.into_iter().map(|c| Arc::from(c.as_str())).collect();
+                                    info!(
+                                        "[binlog-tap] ✨ Dynamically fetched {} columns for {}.{}",
+                                        columns.len(),
+                                        table_map.database_name(),
+                                        table_map.table_name()
+                                    );
+                                }
+                            }
+                        }
 
                         table_metadata.insert(
                             table_id,
