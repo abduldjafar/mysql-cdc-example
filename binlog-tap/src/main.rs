@@ -274,6 +274,7 @@ pub async fn writer(
 
     let http_client = reqwest::Client::builder()
         .pool_max_idle_per_host(20)
+        .http1_only()
         .build()
         .expect("Failed to build HTTP Client");
 
@@ -458,11 +459,8 @@ async fn flush_table(
                 // we'll use tuple() which tells ClickHouse to just insert it unsorted. For more robust PK extraction, we need the table config.
                 create_query.push_str(") ENGINE = MergeTree() ORDER BY tuple()");
 
-                let mut create_req = client.post(format!(
-                    "{}/?query={}",
-                    args.clickhouse_url,
-                    urlencoding::encode(&create_query)
-                ));
+                // Send CREATE TABLE as the POST body to ensure Content-Length is provided
+                let mut create_req = client.post(&args.clickhouse_url).body(create_query);
                 if !args.clickhouse_user.is_empty() {
                     create_req =
                         create_req.basic_auth(&args.clickhouse_user, Some(&args.clickhouse_pass));
