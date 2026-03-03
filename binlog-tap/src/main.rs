@@ -421,10 +421,67 @@ async fn flush_table(
 
             if is_exists_text == "0" {
                 warn!(
-                    "[flush] ⚠️ Table '{}' does not exist in ClickHouse! Skipping {} rows to prevent crash.",
-                    table, row_count
+                    "[flush] ⚠️ Table '{}' does not exist in ClickHouse! Attempting to create it dynamically...",
+                    table
                 );
-                return Ok(());
+
+                // Build dynamic schema from the first row
+                let mut create_query = format!("CREATE TABLE {} (", table);
+                let first_row = &rows[0];
+
+                for (i, col) in first_row.columns.iter().enumerate() {
+                    if i > 0 {
+                        create_query.push_str(", ");
+                    }
+
+                    let ch_type = match &col.value {
+                        binlog_tap::config::CdcValue::Null
+                        | binlog_tap::config::CdcValue::String(_)
+                        | binlog_tap::config::CdcValue::Bytes(_)
+                        | binlog_tap::config::CdcValue::Json(_) => "Nullable(String)",
+                        binlog_tap::config::CdcValue::Bool(_) => "Nullable(Bool)",
+                        binlog_tap::config::CdcValue::Int(_) => "Nullable(Int64)",
+                        binlog_tap::config::CdcValue::Uint(_) => "Nullable(UInt64)",
+                        binlog_tap::config::CdcValue::Float(_) => "Nullable(Float64)",
+                        binlog_tap::config::CdcValue::Decimal(_) => "Nullable(Decimal(38, 9))", // Safest default for unknown decimal scales
+                        binlog_tap::config::CdcValue::Uuid(_) => "Nullable(UUID)",
+                        binlog_tap::config::CdcValue::Date(_) => "Nullable(Date)",
+                        binlog_tap::config::CdcValue::Time(_) => "Nullable(String)", // Time doesn't perfectly map to CH, String is safest
+                        binlog_tap::config::CdcValue::DateTime(_) => "Nullable(DateTime64(3))",
+                    };
+
+                    create_query.push_str(&format!("`{}` {}", col.name, ch_type));
+                }
+
+                // Assuming MergeTree architecture for auto-creation
+                // ClickHouse requires an ORDER BY for MergeTree, but since we don't know the exact PK here natively from the stream,
+                // we'll use tuple() which tells ClickHouse to just insert it unsorted. For more robust PK extraction, we need the table config.
+                create_query.push_str(") ENGINE = MergeTree() ORDER BY tuple()");
+
+                let mut create_req = client.post(format!(
+                    "{}/?query={}",
+                    args.clickhouse_url,
+                    urlencoding::encode(&create_query)
+                ));
+                if !args.clickhouse_user.is_empty() {
+                    create_req =
+                        create_req.basic_auth(&args.clickhouse_user, Some(&args.clickhouse_pass));
+                }
+
+                let create_res = create_req.send().await?;
+                if !create_res.status().is_success() {
+                    let err = create_res.text().await.unwrap_or_default();
+                    error!(
+                        "❌ [flush] Failed to auto-create table '{}': {}",
+                        table, err
+                    );
+                    return Err(err.into());
+                }
+
+                info!(
+                    "[flush] ✨ Auto-created table '{}' successfully in ClickHouse!",
+                    table
+                );
             }
 
             // Valid! Cache it so we never make this EXISTS HTTP request again for this table
