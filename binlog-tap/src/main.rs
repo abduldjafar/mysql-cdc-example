@@ -196,21 +196,32 @@ async fn process_binlog_stream_zero_copy(
                             // Tier 2: Extract from TableMapEvent optional metadata (MySQL 8.0+ with binlog_row_metadata=FULL)
                             if cols.is_empty() {
                                 use mysql_async::binlog::events::OptionalMetaExtractor;
-                                if let Ok(extractor) =
-                                    OptionalMetaExtractor::new(table_map.iter_optional_meta())
-                                {
-                                    let extracted: Vec<Arc<str>> = extractor
-                                        .iter_column_name()
-                                        .filter_map(|r| r.ok())
-                                        .map(|cn| Arc::from(cn.name().as_ref()))
-                                        .collect();
-                                    if !extracted.is_empty() {
-                                        info!(
-                                            "[binlog-tap] Extracted {} column names from binlog metadata for {}",
-                                            extracted.len(),
-                                            full_table_name
+                                match OptionalMetaExtractor::new(table_map.iter_optional_meta()) {
+                                    Ok(extractor) => {
+                                        let extracted: Vec<Arc<str>> = extractor
+                                            .iter_column_name()
+                                            .filter_map(|r| r.ok())
+                                            .map(|cn| Arc::from(cn.name().as_ref()))
+                                            .collect();
+                                        if !extracted.is_empty() {
+                                            info!(
+                                                "[binlog-tap] Extracted {} column names from binlog metadata for {}",
+                                                extracted.len(),
+                                                full_table_name
+                                            );
+                                            cols = extracted;
+                                        } else {
+                                            warn!(
+                                                "[binlog-tap] OptionalMetaExtractor succeeded but extracted 0 columns for {}",
+                                                full_table_name
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "[binlog-tap] OptionalMetaExtractor failed for {}: {:?}",
+                                            full_table_name, e
                                         );
-                                        cols = extracted;
                                     }
                                 }
                             }
