@@ -10,7 +10,7 @@ use binlog_tap::errors::Result as BinlogTapResult;
 use binlog_tap::zero_copy::{CdcColumnRef, CdcEventRef, CdcValueRef};
 use clap::Parser;
 use futures::StreamExt;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use mysql_async::binlog::events::{EventData, TableMapEvent};
 use mysql_async::prelude::*;
 use mysql_async::{BinlogStreamRequest, Pool};
@@ -159,6 +159,8 @@ async fn process_binlog_stream_zero_copy(
     let mut binlog_stream = conn.get_binlog_stream(request).await?;
 
     let mut event_count = 0;
+    // Name-based column cache: resolved ONCE per "db.table", reused across table_id changes
+    let mut resolved_columns: HashMap<String, Vec<Arc<str>>> = HashMap::new();
 
     while let Some(event) = binlog_stream.next().await {
         match event {
@@ -168,64 +170,47 @@ async fn process_binlog_stream_zero_copy(
                 if let Some(event_data) = event.read_data()? {
                     if let EventData::TableMapEvent(table_map) = event_data {
                         let table_id = table_map.table_id();
+                        let full_table_name =
+                            format!("{}.{}", table_map.database_name(), table_map.table_name());
 
-                        // Skip if we already cached this table_id — avoids re-resolving on every event
-                        if table_metadata.contains_key(&table_id) {
-                            continue;
-                        }
-                        debug!(
-                            "[binlog-tap] Cached table: {}.{} (id: {})",
-                            table_map.database_name(),
-                            table_map.table_name(),
-                            table_id
-                        );
+                        // Fast path: if we already resolved columns for this table NAME, reuse them
+                        let columns = if let Some(cached) = resolved_columns.get(&full_table_name) {
+                            cached.clone()
+                        } else {
+                            // === COLUMN NAME RESOLUTION (runs ONCE per table name) ===
 
-                        let db_name: Arc<str> = Arc::from(table_map.database_name());
-                        let table_name: Arc<str> = Arc::from(table_map.table_name());
+                            // Tier 1: Startup cache
+                            let mut cols = name_to_columns
+                                .get(&full_table_name)
+                                .cloned()
+                                .unwrap_or_default();
 
-                        // === 4-TIER COLUMN NAME RESOLUTION ===
-                        // Tier 1: Startup cache (fastest)
-                        let mut columns = name_to_columns
-                            .get(&format!(
-                                "{}.{}",
-                                table_map.database_name(),
-                                table_map.table_name()
-                            ))
-                            .cloned()
-                            .unwrap_or_default();
-
-                        // Tier 2: Extract from TableMapEvent optional metadata (MySQL 8.0+)
-                        // This is embedded in the binlog event itself - no network roundtrip!
-                        if columns.is_empty() {
-                            use mysql_async::binlog::events::OptionalMetaExtractor;
-                            if let Ok(extractor) =
-                                OptionalMetaExtractor::new(table_map.iter_optional_meta())
-                            {
-                                let extracted: Vec<Arc<str>> = extractor
-                                    .iter_column_name()
-                                    .filter_map(|r| r.ok())
-                                    .map(|cn| Arc::from(cn.name().as_ref()))
-                                    .collect();
-                                if !extracted.is_empty() {
-                                    info!(
-                                        "[binlog-tap] Extracted {} column names from binlog metadata for {}.{}",
-                                        extracted.len(),
-                                        table_map.database_name(),
-                                        table_map.table_name()
-                                    );
-                                    columns = extracted;
+                            // Tier 2: Extract from TableMapEvent optional metadata (MySQL 8.0+ with binlog_row_metadata=FULL)
+                            if cols.is_empty() {
+                                use mysql_async::binlog::events::OptionalMetaExtractor;
+                                if let Ok(extractor) =
+                                    OptionalMetaExtractor::new(table_map.iter_optional_meta())
+                                {
+                                    let extracted: Vec<Arc<str>> = extractor
+                                        .iter_column_name()
+                                        .filter_map(|r| r.ok())
+                                        .map(|cn| Arc::from(cn.name().as_ref()))
+                                        .collect();
+                                    if !extracted.is_empty() {
+                                        info!(
+                                            "[binlog-tap] Extracted {} column names from binlog metadata for {}",
+                                            extracted.len(),
+                                            full_table_name
+                                        );
+                                        cols = extracted;
+                                    }
                                 }
                             }
-                        }
 
-                        // Tier 3: Query INFORMATION_SCHEMA (network fallback)
-                        if columns.is_empty() {
-                            warn!(
-                                "[binlog-tap] Schema for {}.{} not found in cache or binlog metadata. Querying INFORMATION_SCHEMA...",
-                                table_map.database_name(),
-                                table_map.table_name()
-                            );
-                            if let Ok(mut fallback_conn) = pool.get_conn().await {
+                            // Tier 3: Query INFORMATION_SCHEMA (network fallback)
+                            if cols.is_empty()
+                                && let Ok(mut fallback_conn) = pool.get_conn().await
+                            {
                                 let query = r#"
                                     SELECT COLUMN_NAME
                                     FROM INFORMATION_SCHEMA.COLUMNS
@@ -244,30 +229,34 @@ async fn process_binlog_stream_zero_copy(
                                     && !rows.is_empty()
                                 {
                                     info!(
-                                        "[binlog-tap] Dynamically fetched {} columns from INFORMATION_SCHEMA for {}.{}",
+                                        "[binlog-tap] Fetched {} columns from INFORMATION_SCHEMA for {}",
                                         rows.len(),
-                                        table_map.database_name(),
-                                        table_map.table_name()
+                                        full_table_name
                                     );
-                                    columns =
+                                    cols =
                                         rows.into_iter().map(|c| Arc::from(c.as_str())).collect();
                                 }
                             }
-                        }
 
-                        // Tier 4: Generate numbered placeholder column names as last resort
-                        if columns.is_empty() {
-                            let col_count = table_map.columns_count() as usize;
-                            warn!(
-                                "[binlog-tap] All column name sources exhausted for {}.{}. Generating {} numbered columns as fallback.",
-                                table_map.database_name(),
-                                table_map.table_name(),
-                                col_count
-                            );
-                            columns = (0..col_count)
-                                .map(|i| Arc::from(format!("col_{}", i).as_str()))
-                                .collect();
-                        }
+                            // Tier 4: Generate numbered column names as last resort
+                            if cols.is_empty() {
+                                let col_count = table_map.columns_count() as usize;
+                                warn!(
+                                    "[binlog-tap] No column names available for {}. Using {} numbered columns.",
+                                    full_table_name, col_count
+                                );
+                                cols = (0..col_count)
+                                    .map(|i| Arc::from(format!("col_{}", i).as_str()))
+                                    .collect();
+                            }
+
+                            // Cache it permanently by name
+                            resolved_columns.insert(full_table_name.clone(), cols.clone());
+                            cols
+                        };
+
+                        let db_name: Arc<str> = Arc::from(table_map.database_name());
+                        let table_name: Arc<str> = Arc::from(table_map.table_name());
 
                         table_metadata.insert(
                             table_id,
