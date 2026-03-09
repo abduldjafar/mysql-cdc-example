@@ -62,7 +62,7 @@ async fn main() -> BinlogTapResult<()> {
 
     let table_config = CdcConfig::load_from_file(&config_path)?;
 
-    let mut threads_conn: Vec<tokio::task::JoinHandle<BinlogTapResult<()>>> = Vec::new();
+    let mut tasks: Vec<tokio::task::JoinHandle<BinlogTapResult<()>>> = Vec::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<CdcEvent>(10000);
 
     let writer_handle = tokio::spawn({
@@ -98,13 +98,13 @@ async fn main() -> BinlogTapResult<()> {
                 Ok(())
             }
         });
-        threads_conn.push(worker_handle);
+        tasks.push(worker_handle);
     }
 
     drop(tx);
 
-    for thread in threads_conn {
-        match thread.await {
+    for task in tasks {
+        match task.await {
             Ok(Err(e)) => error!("Worker thread failed: {}", e),
             Err(e) => error!("Worker task panicked/failed to join: {}", e),
             _ => {}
