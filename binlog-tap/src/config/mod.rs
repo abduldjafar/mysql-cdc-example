@@ -187,7 +187,41 @@ impl CdcValue {
 
 impl CdcConfig {
     pub fn load_from_file(path: &str) -> Result<Self> {
-        let config = std::fs::read_to_string(path)?;
+        let raw = std::fs::read_to_string(path)?;
+        // Substitute ${VAR_NAME} with environment variable values.
+        // This allows table_config.toml to reference secrets via docker-compose env vars.
+        let config = substitute_env_vars(&raw);
         Ok(toml::from_str(&config)?)
     }
+}
+
+/// Replace every `${VAR_NAME}` occurrence in `input` with the value of
+/// the corresponding environment variable. Unknown variables are left as-is.
+fn substitute_env_vars(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut remaining = input;
+    while let Some(start) = remaining.find("${") {
+        result.push_str(&remaining[..start]);
+        remaining = &remaining[start + 2..];
+        if let Some(end) = remaining.find('}') {
+            let var_name = &remaining[..end];
+            match std::env::var(var_name) {
+                Ok(val) => result.push_str(&val),
+                Err(_) => {
+                    // Leave the placeholder intact so the error is visible in logs
+                    result.push_str("${");
+                    result.push_str(var_name);
+                    result.push('}');
+                }
+            }
+            remaining = &remaining[end + 1..];
+        } else {
+            // No closing brace — emit literally and stop scanning
+            result.push_str("${");
+            result.push_str(remaining);
+            remaining = "";
+        }
+    }
+    result.push_str(remaining);
+    result
 }

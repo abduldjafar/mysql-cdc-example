@@ -1,8 +1,8 @@
 [[databases]]
 name = "fintech_db"
-# URL dibaca dari environment variable DATABASE_URL saat startup
+# URL dibaca dari environment variable DATABASE_URL_CDC saat startup
 # Format: mysql://user:password@host:port/  (tanpa nama database di path)
-url = "mysql://root:rootpassword@mysql-cdc:3306"
+url = "${DATABASE_URL_CDC}"
 server_id = 2
 exclude_tables = ["migrations", "audit_logs"]
 

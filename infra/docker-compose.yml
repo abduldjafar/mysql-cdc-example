@@ -110,6 +110,8 @@ services:
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASS: ${DB_PASSWORD}
       DATABASE_URL: mysql://root:${DB_PASSWORD}@mysql-cdc:3306/fintech_db
+      # URL untuk binlog-tap (dibaca via ${DATABASE_URL_CDC} di table_config.toml)
+      DATABASE_URL_CDC: mysql://root:${DB_PASSWORD}@mysql-cdc:3306
     command:
       - "--batch-size"
       - "50000"
