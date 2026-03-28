@@ -129,7 +129,7 @@ async fn snapshot_columns(
         SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = ?
-        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        ORDER BY TABLE_NAME, ORDINAL_POSITION;
     "#;
 
     let rows: Vec<(String, String, String)> = conn.exec(query, (db_name,)).await?;
