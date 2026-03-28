@@ -62,12 +62,25 @@ async fn main() -> BinlogTapResult<()> {
 
     let table_config = CdcConfig::load_from_file(&config_path)?;
 
+    // Build "db.table" -> primary_key map from config for use in auto-CREATE DDL
+    let mut pk_map: HashMap<String, String> = HashMap::new();
+    for db in &table_config.databases {
+        if let Some(tables) = &db.tables {
+            for tbl in tables {
+                let key = format!("{}.{}", db.name, tbl.name);
+                pk_map.insert(key, tbl.primary_key.clone());
+            }
+        }
+    }
+    let primary_keys = Arc::new(pk_map);
+
     let mut tasks: Vec<tokio::task::JoinHandle<BinlogTapResult<()>>> = Vec::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<CdcEvent>(10000);
 
     let writer_handle = tokio::spawn({
         let args = args.clone();
-        async move { writer(rx, args).await }
+        let primary_keys = Arc::clone(&primary_keys);
+        async move { writer(rx, args, primary_keys).await }
     });
 
     for db in table_config.databases {
@@ -395,6 +408,7 @@ async fn process_binlog_stream_zero_copy(
 pub async fn writer(
     mut rx: tokio::sync::mpsc::Receiver<CdcEvent>,
     args: Args,
+    primary_keys: Arc<HashMap<String, String>>,
 ) -> BinlogTapResult<()> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
     let mut flush_tasks = tokio::task::JoinSet::new();
@@ -440,7 +454,7 @@ pub async fn writer(
                                 && let Some(ready_rows) = buffers.remove(&flush_key) {
                                     total_events -= ready_rows.len();
                                     warn!("[binlog-tap] ⚠️ Memory limit ({} rows) reached! Force-flushing {} events from '{}' early...", args.max_buffer_size, ready_rows.len(), flush_key);
-                                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), flush_key, ready_rows);
+                                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), Arc::clone(&primary_keys), flush_key, ready_rows);
                                 }
                         }
 
@@ -451,14 +465,14 @@ pub async fn writer(
                         if buf.len() >= args.batch_size {
                             let rows = std::mem::take(buf);
                             total_events -= rows.len();
-                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), key, rows);
+                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), Arc::clone(&primary_keys), key, rows);
                         }
                     }
                     None => {
                         println!();
                         info!("Channel closed, flushing remaining buffers...");
                         for (key, rows) in buffers.drain().filter(|(_, rows)| !rows.is_empty()) {
-                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), key, rows);
+                            spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), Arc::clone(&primary_keys), key, rows);
                         }
                         break;
                     }
@@ -469,7 +483,7 @@ pub async fn writer(
                 for (key, buf) in buffers.iter_mut().filter(|(_, v)| !v.is_empty()) {
                     let rows = std::mem::take(buf);
                     total_events -= rows.len();
-                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), key.clone(), rows);
+                    spawn_flush_task(&mut flush_tasks, Arc::clone(&semaphore), http_client.clone(), Arc::clone(&shared_args), Arc::clone(&known_tables), Arc::clone(&primary_keys), key.clone(), rows);
                 }
             }
 
@@ -506,6 +520,7 @@ fn spawn_flush_task(
     client: reqwest::Client,
     args: Arc<Args>,
     known_tables: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    primary_keys: Arc<HashMap<String, String>>,
     key: String,
     rows: Vec<CdcEvent>,
 ) {
@@ -515,7 +530,7 @@ fn spawn_flush_task(
             .await
             .expect("Semaphore closed unexpectedly");
 
-        if let Err(e) = flush_table(client, args, known_tables, key, rows).await {
+        if let Err(e) = flush_table(client, args, known_tables, primary_keys, key, rows).await {
             error!("❌ [flush] ClickHouse Insert Failed: {}", e);
         }
     });
@@ -525,6 +540,7 @@ async fn flush_table(
     client: reqwest::Client,
     args: Arc<Args>,
     known_tables: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    primary_keys: Arc<HashMap<String, String>>,
     table: String,
     rows: Vec<CdcEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -614,8 +630,11 @@ async fn flush_table(
                 // ReplacingMergeTree: deduplicates rows by primary key on merge.
                 // _is_deleted tombstone pattern: rows with _is_deleted=1 are treated as DELETEs
                 // by querying with FINAL or by the ReplacingMergeTree cleanup logic.
-                create_query
-                    .push_str(") ENGINE = ReplacingMergeTree(_cdc_timestamp) ORDER BY tuple()");
+                let order_by = primary_keys
+                    .get(&table)
+                    .map(|pk| format!("ORDER BY (`{}`)", pk))
+                    .unwrap_or_else(|| "ORDER BY tuple()".to_string());
+                create_query.push_str(&format!(") ENGINE = ReplacingMergeTree(_cdc_timestamp) {}", order_by));
 
                 // Send CREATE TABLE as the POST body to ensure Content-Length is provided
                 let mut create_req = client.post(&args.clickhouse_url).body(create_query);
