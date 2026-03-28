@@ -30,7 +30,7 @@ services:
     networks:
       - data_network
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok"]
+      test: ["CMD-SHELL", "zkServer.sh status 2>/dev/null | grep -q 'Mode:'"]
       interval: 10s
       timeout: 5s
       retries: 10
