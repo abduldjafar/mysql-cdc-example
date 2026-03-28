@@ -372,18 +372,14 @@ async fn process_binlog_stream_zero_copy(
                                                                 CdcValueRef::from_binlog_value_ref(
                                                                     binlog_val,
                                                                 ),
-                                                            is_primary_key: if primary_keys.get(
-                                                                format!(
+                                                            is_primary_key: primary_keys
+                                                                .get(&format!(
                                                                     "{}.{}",
                                                                     metadata.db_name.as_ref(),
                                                                     metadata.table_name.as_ref()
-                                                                ),
-                                                            ) == column_name
-                                                            {
-                                                                true
-                                                            } else {
-                                                                false
-                                                            },
+                                                                ))
+                                                                .map(|pk| pk == column_name)
+                                                                .unwrap_or(false),
                                                         }
                                                     })
                                                     .collect(),
