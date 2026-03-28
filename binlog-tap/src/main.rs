@@ -79,6 +79,7 @@ async fn main() -> BinlogTapResult<()> {
                 let mut table_metadata: HashMap<u64, TableMetadata> = HashMap::new();
 
                 snapshot_columns(&pool, &db.name, &mut name_to_columns).await?;
+
                 info!(
                     "[binlog-tap] {} tables dimuat dari {}",
                     name_to_columns.len(),
