@@ -2,66 +2,73 @@ services:
   mysql-cdc:
     image: mysql:8.0
     container_name: mysql-cdc
-    restart: always
+    restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
       MYSQL_DATABASE: fintech_db
     ports:
-      - "3306:3306"
+      # Aman: Hanya bisa diakses dari localhost VPS
+      - "127.0.0.1:3306:3306"
     volumes:
-      - ./my.cnf:/etc/mysql/conf.d/my.cnf
+      - ./my.cnf:/etc/mysql/conf.d/my.cnf:ro
       - mysql_data:/var/lib/mysql
+    networks:
+      - data_network
 
   zookeeper:
     image: zookeeper:3.8
     container_name: zookeeper
-    restart: always
-    ports:
-      - "2181:2181"
+    restart: unless-stopped
+    networks:
+      - data_network
 
   clickhouse-01:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse-01
-    restart: always
+    restart: unless-stopped
     environment:
       CLICKHOUSE_DB: fintech_db
       CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: rootpassword
+      CLICKHOUSE_PASSWORD: ${DB_PASSWORD}
     ports:
-      - "8123:8123" # HTTP Node 1
-      - "9000:9000" # TCP Node 1 (Rust Client Primary)
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
     deploy:
       resources:
         limits:
           memory: 1G
     volumes:
       - clickhouse_01_data:/var/lib/clickhouse
-      - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml
-      - ./macros-01.xml:/etc/clickhouse-server/config.d/macros.xml
+      - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./macros-01.xml:/etc/clickhouse-server/config.d/macros.xml:ro
     depends_on:
       - zookeeper
+    networks:
+      - data_network
 
   clickhouse-02:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse-02
-    restart: always
+    restart: unless-stopped
     environment:
       CLICKHOUSE_DB: fintech_db
       CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: rootpassword
+      CLICKHOUSE_PASSWORD: ${DB_PASSWORD}
     ports:
-      - "8124:8123" # HTTP Node 2
-      - "9001:9000" # TCP Node 2 (Rust Client Fallback)
+      - "127.0.0.1:8124:8123"
+      - "127.0.0.1:9001:9000"
     deploy:
       resources:
         limits:
           memory: 1G
     volumes:
       - clickhouse_02_data:/var/lib/clickhouse
-      - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml
-      - ./macros-02.xml:/etc/clickhouse-server/config.d/macros.xml
+      - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./macros-02.xml:/etc/clickhouse-server/config.d/macros.xml:ro
     depends_on:
       - zookeeper
+    networks:
+      - data_network
 
   binlog-tap:
     build:
@@ -71,7 +78,9 @@ services:
     restart: unless-stopped
     environment:
       RUST_LOG: info
-    command: [ "--batch-size", "50000", "--max-buffer-size", "100000", "--flush-interval-secs", "30", "--clickhouse-url", "http://clickhouse-01:8123", "--clickhouse-user", "default", "--clickhouse-pass", "rootpassword" ]
+      # Koneksi internal Docker, langsung merakit URL dengan host 'mysql-cdc'
+      DATABASE_URL: mysql://root:${DB_PASSWORD}@mysql-cdc:3306/fintech_db
+    command: [ "--batch-size", "50000", "--max-buffer-size", "100000", "--flush-interval-secs", "30", "--clickhouse-url", "http://clickhouse-01:8123", "--clickhouse-user", "default", "--clickhouse-pass", "${DB_PASSWORD}" ]
     volumes:
       - ../binlog-tap/table_config.toml:/app/table_config.toml:ro
     depends_on:
@@ -83,8 +92,14 @@ services:
         limits:
           memory: 512M
           cpus: "0.5"
+    networks:
+      - data_network
 
 volumes:
   mysql_data:
   clickhouse_01_data:
   clickhouse_02_data:
+
+networks:
+  data_network:
+    driver: bridge

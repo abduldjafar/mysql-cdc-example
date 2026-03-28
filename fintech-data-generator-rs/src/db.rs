@@ -4,20 +4,20 @@ pub async fn setup_database(pool: &MySqlPool, reset: bool) -> Result<(), sqlx::E
     if reset {
         println!("🧨 Resetting database schema...");
         sqlx::query("SET FOREIGN_KEY_CHECKS = 0").execute(pool).await?;
-        sqlx::query("SET SESSION binlog_row_metadata = FULL").execute(pool).await?;
-        sqlx::query("SET SESSION binlog_row_image = FULL").execute(pool).await?;
         
+        // DUA BARIS SET SESSION BINLOG DIHAPUS DARI SINI
+
         let tables = [
-            "transaction_vouchers", "transaction_items", "transactions", 
-            "topups", "wallet_histories", "wallets", "user_identities", 
+            "transaction_vouchers", "transaction_items", "transactions",
+            "topups", "wallet_histories", "wallets", "user_identities",
             "merchants", "users", "promotions"
         ];
-        
+
         for table in tables {
             let q = format!("DROP TABLE IF EXISTS {}", table);
             sqlx::query(&q).execute(pool).await?;
         }
-        
+
         sqlx::query("SET FOREIGN_KEY_CHECKS = 1").execute(pool).await?;
     }
 

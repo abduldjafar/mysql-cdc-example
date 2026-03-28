@@ -11,6 +11,9 @@ use chrono::Local;
 use rand::RngExt;
 use std::io::Write;
 
+// Import library untuk membaca .env
+use dotenvy::dotenv; 
+
 use crate::db::setup_database;
 use crate::ingest::inject_batch;
 
@@ -22,6 +25,9 @@ fn print_header() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Muat variabel environment dari file .env secara otomatis
+    dotenv().ok(); 
+
     print_header();
 
     let theme = ColorfulTheme::default();
@@ -39,10 +45,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .interact()?;
 
     println!("{}", "Connecting to database...".yellow());
-    // Try environment variable, fallback to default local connection
+    
+    // 2. KEAMANAN DITINGKATKAN: Wajib menggunakan Environment Variable
+    // Program akan langsung 'panic' (berhenti) jika DATABASE_URL tidak ditemukan,
+    // mencegah koneksi tidak sengaja menggunakan kredensial default yang lemah.
     let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "mysql://root:rootpassword@localhost:3306/fintech_db".to_string());
-        
+        .expect("❌ ERROR: DATABASE_URL tidak ditemukan! Pastikan file .env sudah ada dan berisi koneksi database yang aman.");
+
     let pool = MySqlPoolOptions::new()
         .max_connections(100)
         .connect(&db_url)
@@ -76,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_prompt("Interval pengiriman (detik):")
             .default(10)
             .interact_text()?;
-            
+
         let min_u: i32 = Input::with_theme(&theme).with_prompt("Min users per interval:").default(1).interact_text()?;
         let max_u: i32 = Input::with_theme(&theme).with_prompt("Max users per interval:").default(3).interact_text()?;
         let min_t: i32 = Input::with_theme(&theme).with_prompt("Min transactions per interval:").default(5).interact_text()?;
@@ -98,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = inject_batch(&pool, u_rand, 0, t_rand, false).await {
                 println!("\n{} {}", "❌ ERROR:".red(), e);
             }
-            
+
             sleep(Duration::from_secs(interval)).await;
         }
     }

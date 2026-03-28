@@ -30,8 +30,6 @@ pub async fn inject_batch(
 
     let mut rng = rand::rng();
     let mut tx = pool.begin().await?;
-    sqlx::query("SET SESSION binlog_row_metadata = FULL").execute(&mut *tx).await?;
-    sqlx::query("SET SESSION binlog_row_image = FULL").execute(&mut *tx).await?;
 
     // 1. Users
     if n_users > 0 {
