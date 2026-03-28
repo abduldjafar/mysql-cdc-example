@@ -36,12 +36,12 @@ pub struct Args {
     #[arg(long, default_value_t = String::from("http://localhost:8123"))]
     pub clickhouse_url: String,
 
-    /// ClickHouse Username
-    #[arg(long, default_value_t = String::from("default"))]
+    /// ClickHouse Username (also read from CLICKHOUSE_USER env var)
+    #[arg(long, env = "CLICKHOUSE_USER", default_value_t = String::from("default"))]
     pub clickhouse_user: String,
 
-    /// ClickHouse Password
-    #[arg(long, default_value_t = String::from(""))]
+    /// ClickHouse Password (also read from CLICKHOUSE_PASS env var)
+    #[arg(long, env = "CLICKHOUSE_PASS", default_value_t = String::from(""))]
     pub clickhouse_pass: String,
 }
 
@@ -320,45 +320,53 @@ async fn process_binlog_stream_zero_copy(
                             // ZERO-COPY MAGIC HAPPENS HERE!
                             for row_result in rows_event.rows(&metadata.map_event) {
                                 match row_result {
-                                    Ok((_before, Some(row_after))) => {
-                                        // Step 1: Extract BinlogValues (owned by mysql_async with 'static)
-                                        let binlog_values = row_after.unwrap();
-
-                                        // Step 2: Build zero-copy CdcEventRef by borrowing from binlog_values
-                                        let zero_copy_event = CdcEventRef {
-                                            db_name: metadata.db_name.as_ref(),
-                                            table_name: metadata.table_name.as_ref(),
-                                            event_type,
-                                            columns: binlog_values
-                                                .iter()
-                                                .enumerate()
-                                                .map(|(i, binlog_val)| {
-                                                    let column_name = metadata
-                                                        .columns
-                                                        .get(i)
-                                                        .map(|arc| arc.as_ref())
-                                                        .unwrap_or("unknown");
-
-                                                    CdcColumnRef {
-                                                        name: column_name,
-                                                        value: CdcValueRef::from_binlog_value_ref(
-                                                            binlog_val,
-                                                        ),
-                                                    }
-                                                })
-                                                .collect(),
+                                    Ok((before, after_opt)) => {
+                                        // Pick the data row to emit:
+                                        //   INSERT / UPDATE → emit the new "after" row
+                                        //   DELETE          → emit the "before" row as a soft-delete tombstone
+                                        let row_data = match (event_type, after_opt, before) {
+                                            // INSERT or UPDATE: use the after row
+                                            (_, Some(row_after), _) => Some(row_after.unwrap()),
+                                            // DELETE: use the before row
+                                            (EventType::Delete, None, Some(row_before)) => Some(row_before.unwrap()),
+                                            _ => None,
                                         };
 
-                                        // Step 3: Convert to owned ONLY when sending through channel
-                                        // This is the only allocation point!
-                                        let owned_event = zero_copy_event.to_owned_event(
-                                            Arc::clone(&metadata.db_name),
-                                            Arc::clone(&metadata.table_name),
-                                        );
+                                        if let Some(binlog_values) = row_data {
+                                            // Build zero-copy CdcEventRef by borrowing from binlog_values
+                                            let zero_copy_event = CdcEventRef {
+                                                db_name: metadata.db_name.as_ref(),
+                                                table_name: metadata.table_name.as_ref(),
+                                                event_type,
+                                                columns: binlog_values
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(i, binlog_val)| {
+                                                        let column_name = metadata
+                                                            .columns
+                                                            .get(i)
+                                                            .map(|arc| arc.as_ref())
+                                                            .unwrap_or("unknown");
 
-                                        tx.send(owned_event).await?;
+                                                        CdcColumnRef {
+                                                            name: column_name,
+                                                            value: CdcValueRef::from_binlog_value_ref(
+                                                                binlog_val,
+                                                            ),
+                                                        }
+                                                    })
+                                                    .collect(),
+                                            };
+
+                                            // Convert to owned ONLY when sending through channel
+                                            let owned_event = zero_copy_event.to_owned_event(
+                                                Arc::clone(&metadata.db_name),
+                                                Arc::clone(&metadata.table_name),
+                                            );
+
+                                            tx.send(owned_event).await?;
+                                        }
                                     }
-                                    Ok((_before, None)) => {} // DELETE
                                     Err(e) => {
                                         return Err(e.into());
                                     }
@@ -519,13 +527,32 @@ async fn flush_table(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let row_count = rows.len();
 
+    // Parse "db.table" into parts for URL-safe queries
+    let table_parts: Vec<&str> = table.splitn(2, '.').collect();
+    if table_parts.len() != 2 {
+        return Err(format!("Invalid table identifier '{}': expected 'db.table' format", table).into());
+    }
+
+    // URL-encode the table name for safe embedding in the HTTP query string
+    let table_encoded = format!("{}.{}",
+        urlencoding::encode(table_parts[0]),
+        urlencoding::encode(table_parts[1]),
+    );
+
     // 0. Super-fast in-memory cache to verify if Table Exists
     {
         let cache = known_tables.read().await;
         if !cache.contains(&table) {
             drop(cache); // Release read lock to allow network query
 
-            let check_url = format!("{}/?query=EXISTS%20{}", args.clickhouse_url, table);
+            // Use system.tables query — more reliable than non-standard EXISTS TABLE syntax
+            let encoded_db = urlencoding::encode(&table_parts[0]);
+            let encoded_tbl = urlencoding::encode(&table_parts[1]);
+            let encoded_query = urlencoding::encode(&format!(
+                "SELECT count() FROM system.tables WHERE database='{}' AND name='{}'",
+                encoded_db, encoded_tbl
+            ));
+            let check_url = format!("{}/?query={}", args.clickhouse_url, encoded_query);
             let mut check_req = client.get(&check_url);
 
             if !args.clickhouse_user.is_empty() {
@@ -560,20 +587,25 @@ async fn flush_table(
                         binlog_tap::config::CdcValue::Int(_) => "Nullable(Int64)",
                         binlog_tap::config::CdcValue::Uint(_) => "Nullable(UInt64)",
                         binlog_tap::config::CdcValue::Float(_) => "Nullable(Float64)",
-                        binlog_tap::config::CdcValue::Decimal(_) => "Nullable(Decimal(38, 9))", // Safest default for unknown decimal scales
+                        binlog_tap::config::CdcValue::Decimal(_) => "Nullable(Decimal(38, 9))",
                         binlog_tap::config::CdcValue::Uuid(_) => "Nullable(UUID)",
                         binlog_tap::config::CdcValue::Date(_) => "Nullable(Date)",
-                        binlog_tap::config::CdcValue::Time(_) => "Nullable(String)", // Time doesn't perfectly map to CH, String is safest
+                        binlog_tap::config::CdcValue::Time(_) => "Nullable(String)",
                         binlog_tap::config::CdcValue::DateTime(_) => "Nullable(DateTime64(3))",
                     };
 
                     create_query.push_str(&format!("`{}` {}", col.name, ch_type));
                 }
 
-                // Assuming MergeTree architecture for auto-creation
-                // ClickHouse requires an ORDER BY for MergeTree, but since we don't know the exact PK here natively from the stream,
-                // we'll use tuple() which tells ClickHouse to just insert it unsorted. For more robust PK extraction, we need the table config.
-                create_query.push_str(") ENGINE = MergeTree() ORDER BY tuple()");
+                // Add CDC meta-columns for tracking event type and ingestion time
+                create_query.push_str(", `_event_type` LowCardinality(String)");
+                create_query.push_str(", `_cdc_timestamp` DateTime64(3) DEFAULT now64()");
+                create_query.push_str(", `_is_deleted` UInt8 DEFAULT 0");
+
+                // ReplacingMergeTree: deduplicates rows by primary key on merge.
+                // _is_deleted tombstone pattern: rows with _is_deleted=1 are treated as DELETEs
+                // by querying with FINAL or by the ReplacingMergeTree cleanup logic.
+                create_query.push_str(") ENGINE = ReplacingMergeTree(_cdc_timestamp) ORDER BY tuple()");
 
                 // Send CREATE TABLE as the POST body to ensure Content-Length is provided
                 let mut create_req = client.post(&args.clickhouse_url).body(create_query);
@@ -649,16 +681,28 @@ async fn flush_table(
                 CdcValue::DateTime(v) => row_str.push_str(&serde_json::to_string(v).unwrap()),
             }
         }
+
+        // Append CDC meta-columns
+        // _event_type: INSERT, UPDATE, or DELETE (DELETE rows are soft-delete tombstones)
+        use std::fmt::Write;
+        write!(row_str, ",\"_event_type\":\"{}\"", row.event_type).unwrap();
+        // _cdc_timestamp: ISO-8601 UTC timestamp when this event was captured by binlog-tap
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+        write!(row_str, ",\"_cdc_timestamp\":\"{}\"", ts).unwrap();
+        // _is_deleted: 1 for DELETE events (soft-delete tombstone), 0 otherwise
+        let is_deleted = if row.event_type == EventType::Delete { 1u8 } else { 0u8 };
+        write!(row_str, ",\"_is_deleted\":{}", is_deleted).unwrap();
+
         row_str.push('}');
         row_str.push('\n'); // Required delimiter for JSONEachRow!
 
         Ok::<bytes::Bytes, std::convert::Infallible>(bytes::Bytes::from(row_str))
     });
 
-    // 2. Build the ClickHouse Target URL dynamically safely
+    // 2. Build the ClickHouse Target URL using the URL-encoded table identifier
     let target_url = format!(
         "{}/?query=INSERT%20INTO%20{}%20FORMAT%20JSONEachRow",
-        args.clickhouse_url, table
+        args.clickhouse_url, table_encoded
     );
 
     // 3. Send blazing fast HTTP POST

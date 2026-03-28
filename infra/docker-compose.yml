@@ -6,6 +6,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
       MYSQL_DATABASE: fintech_db
+      # Allow root to connect from any host (needed for replication)
+      MYSQL_ROOT_HOST: '%'
     ports:
       # Aman: Hanya bisa diakses dari localhost VPS
       - "127.0.0.1:3306:3306"
@@ -14,6 +16,12 @@ services:
       - mysql_data:/var/lib/mysql
     networks:
       - data_network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   zookeeper:
     image: zookeeper:3.8
@@ -21,9 +29,15 @@ services:
     restart: unless-stopped
     networks:
       - data_network
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   clickhouse-01:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:24.3
     container_name: clickhouse-01
     restart: unless-stopped
     environment:
@@ -42,12 +56,19 @@ services:
       - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
       - ./macros-01.xml:/etc/clickhouse-server/config.d/macros.xml:ro
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     networks:
       - data_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   clickhouse-02:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:24.3
     container_name: clickhouse-02
     restart: unless-stopped
     environment:
@@ -66,9 +87,16 @@ services:
       - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
       - ./macros-02.xml:/etc/clickhouse-server/config.d/macros.xml:ro
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     networks:
       - data_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   binlog-tap:
     build:
@@ -78,20 +106,49 @@ services:
     restart: unless-stopped
     environment:
       RUST_LOG: info
-      # Koneksi internal Docker, langsung merakit URL dengan host 'mysql-cdc'
+      # Kredensial dipisah ke env vars, tidak di-hardcode di command
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASS: ${DB_PASSWORD}
       DATABASE_URL: mysql://root:${DB_PASSWORD}@mysql-cdc:3306/fintech_db
-    command: [ "--batch-size", "50000", "--max-buffer-size", "100000", "--flush-interval-secs", "30", "--clickhouse-url", "http://clickhouse-01:8123", "--clickhouse-user", "default", "--clickhouse-pass", "${DB_PASSWORD}" ]
+    command:
+      - "--batch-size"
+      - "50000"
+      - "--max-buffer-size"
+      - "100000"
+      - "--flush-interval-secs"
+      - "30"
+      - "--clickhouse-url"
+      - "http://clickhouse-01:8123"
     volumes:
       - ../binlog-tap/table_config.toml:/app/table_config.toml:ro
     depends_on:
-      - mysql-cdc
-      - clickhouse-01
-      - clickhouse-02
+      mysql-cdc:
+        condition: service_healthy
+      clickhouse-01:
+        condition: service_healthy
+      clickhouse-02:
+        condition: service_healthy
     deploy:
       resources:
         limits:
           memory: 512M
           cpus: "0.5"
+    networks:
+      - data_network
+
+  # Data generator — jalankan dengan:  docker compose --profile tools run --rm fintech-generator
+  fintech-generator:
+    build:
+      context: ../fintech-data-generator-rs
+      dockerfile: Dockerfile
+    container_name: fintech-generator
+    profiles:
+      - tools
+    environment:
+      DATABASE_URL: mysql://root:${DB_PASSWORD}@mysql-cdc:3306/fintech_db
+    depends_on:
+      mysql-cdc:
+        condition: service_healthy
     networks:
       - data_network
 

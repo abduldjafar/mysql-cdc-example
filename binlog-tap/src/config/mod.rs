@@ -75,7 +75,8 @@ impl EventType {
             RowsEventData::DeleteRowsEvent(_) | RowsEventData::DeleteRowsEventV1(_) => {
                 EventType::Delete
             }
-            _ => panic!("Unsupported event type"),
+            // RowsEventData has no other variants that reach here
+            _ => unreachable!("Unsupported RowsEventData variant passed to EventType::from_mysql_event_type"),
         }
     }
 }
@@ -141,24 +142,30 @@ impl CdcValue {
         }
     }
 
-    pub fn to_clikchouse_type(&self) -> String {
+    /// Returns the ClickHouse column type string for DDL generation.
+    /// NOTE: This is used for informational/DDL purposes only. The inline
+    /// `flush_table` DDL already handles type mapping independently.
+    #[allow(dead_code)]
+    pub fn to_clickhouse_type(&self) -> String {
         match self {
-            CdcValue::Null => "Null".to_string(),
-            CdcValue::Bool(_) => "Bool".to_string(),
-            CdcValue::Int(_) => "Int64".to_string(),
-            CdcValue::Uint(_) => "UInt64".to_string(),
-            CdcValue::Float(_) => "Float64".to_string(),
-            CdcValue::Decimal(_) => "Decimal64(18,6)".to_string(),
-            CdcValue::String(_) => "String".to_string(),
-            CdcValue::Bytes(_) => "String".to_string(),
-            CdcValue::Json(_) => "String".to_string(),
-            CdcValue::Uuid(_) => "String".to_string(),
-            CdcValue::Date(_) => "Date".to_string(),
-            CdcValue::Time(_) => "Time".to_string(),
-            CdcValue::DateTime(_) => "DateTime".to_string(),
+            CdcValue::Null => "Nullable(String)".to_string(),
+            CdcValue::Bool(_) => "Nullable(Bool)".to_string(),
+            CdcValue::Int(_) => "Nullable(Int64)".to_string(),
+            CdcValue::Uint(_) => "Nullable(UInt64)".to_string(),
+            CdcValue::Float(_) => "Nullable(Float64)".to_string(),
+            CdcValue::Decimal(_) => "Nullable(Decimal(38, 9))".to_string(),
+            CdcValue::String(_) => "Nullable(String)".to_string(),
+            CdcValue::Bytes(_) => "Nullable(String)".to_string(),
+            CdcValue::Json(_) => "Nullable(String)".to_string(),
+            CdcValue::Uuid(_) => "Nullable(UUID)".to_string(),
+            CdcValue::Date(_) => "Nullable(Date)".to_string(),
+            // TIME has no native ClickHouse equivalent — String is safest
+            CdcValue::Time(_) => "Nullable(String)".to_string(),
+            CdcValue::DateTime(_) => "Nullable(DateTime64(3))".to_string(),
         }
     }
 
+    #[allow(dead_code)]
     pub fn to_clickhouse_value(&self) -> String {
         match self {
             CdcValue::Null => "NULL".to_string(),

@@ -9,15 +9,17 @@ WORKDIR /app
 # Copy manifests first so dependency layer is cached independently
 COPY Cargo.toml Cargo.lock ./
 
-# Dummy src to pre-build dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs \
+# Dummy src to pre-build ALL dependencies (both lib and bin targets)
+RUN mkdir src \
+    && echo "fn main() {}" > src/main.rs \
+    && echo "// dummy" > src/lib.rs \
     && cargo build --release \
     && rm -rf src
 
-# Copy actual source and rebuild only the binary
+# Copy actual source and rebuild only the application binary
 COPY src ./src
-# Touch main.rs so cargo detects the change
-RUN touch src/main.rs && cargo build --release
+# Touch modified files so cargo detects the change
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # ─── Runtime Stage ────────────────────────────────────────────────────────────
 FROM alpine:3.19
