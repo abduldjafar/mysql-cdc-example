@@ -86,6 +86,7 @@ async fn main() -> BinlogTapResult<()> {
     for db in table_config.databases {
         let worker_handle = tokio::spawn({
             let tx = tx.clone();
+            let primary_keys = Arc::clone(&primary_keys);
             async move {
                 let pool = Pool::new(db.url.as_str());
                 let mut name_to_columns: HashMap<String, Vec<Arc<str>>> = HashMap::new();
@@ -105,6 +106,7 @@ async fn main() -> BinlogTapResult<()> {
                     db.server_id,
                     &name_to_columns,
                     &mut table_metadata,
+                    &primary_keys,
                     tx,
                 )
                 .await?;
@@ -166,6 +168,7 @@ async fn process_binlog_stream_zero_copy(
     server_id: u32,
     name_to_columns: &HashMap<String, Vec<Arc<str>>>,
     table_metadata: &mut HashMap<u64, TableMetadata>,
+    primary_keys: &HashMap<String, String>,
     tx: tokio::sync::mpsc::Sender<CdcEvent>,
 ) -> BinlogTapResult<()> {
     let conn = pool.get_conn().await?;
@@ -369,6 +372,18 @@ async fn process_binlog_stream_zero_copy(
                                                                 CdcValueRef::from_binlog_value_ref(
                                                                     binlog_val,
                                                                 ),
+                                                            is_primary_key: if primary_keys.get(
+                                                                format!(
+                                                                    "{}.{}",
+                                                                    metadata.db_name.as_ref(),
+                                                                    metadata.table_name.as_ref()
+                                                                ),
+                                                            ) == column_name
+                                                            {
+                                                                true
+                                                            } else {
+                                                                false
+                                                            },
                                                         }
                                                     })
                                                     .collect(),
@@ -630,14 +645,20 @@ async fn flush_table(
                 // ReplacingMergeTree: deduplicates rows by primary key on merge.
                 // _is_deleted tombstone pattern: rows with _is_deleted=1 are treated as DELETEs
                 // by querying with FINAL or by the ReplacingMergeTree cleanup logic.
+
+                println!("primary keys for table {}: {:?}", table, primary_keys);
+
                 let order_by = primary_keys
                     .get(&table)
                     .map(|pk| format!("ORDER BY (`{}`)", pk))
                     .unwrap_or_else(|| "ORDER BY tuple()".to_string());
-                create_query.push_str(&format!(") ENGINE = ReplacingMergeTree(_cdc_timestamp) {}", order_by));
+                create_query.push_str(&format!(
+                    ") ENGINE = ReplacingMergeTree(_cdc_timestamp) {}",
+                    order_by
+                ));
 
                 // Send CREATE TABLE as the POST body to ensure Content-Length is provided
-                let mut create_req = client.post(&args.clickhouse_url).body(create_query);
+                let mut create_req = client.post(&args.clickhouse_url).body(create_query.clone());
                 if !args.clickhouse_user.is_empty() {
                     create_req =
                         create_req.basic_auth(&args.clickhouse_user, Some(&args.clickhouse_pass));
@@ -647,8 +668,10 @@ async fn flush_table(
                 if !create_res.status().is_success() {
                     let err = create_res.text().await.unwrap_or_default();
                     error!(
-                        "❌ [flush] Failed to auto-create table '{}': {}",
-                        table, err
+                        "❌ [flush] Failed to auto-create table '{}' with error : {} and query: {}",
+                        table,
+                        err,
+                        create_query.clone()
                     );
                     return Err(err.into());
                 }

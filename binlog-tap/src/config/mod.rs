@@ -37,6 +37,7 @@ pub struct CdcEvent {
 pub struct CdcColumn {
     pub name: Arc<str>,
     pub value: CdcValue,
+    pub is_primary_key: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +77,9 @@ impl EventType {
                 EventType::Delete
             }
             // RowsEventData has no other variants that reach here
-            _ => unreachable!("Unsupported RowsEventData variant passed to EventType::from_mysql_event_type"),
+            _ => unreachable!(
+                "Unsupported RowsEventData variant passed to EventType::from_mysql_event_type"
+            ),
         }
     }
 }

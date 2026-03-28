@@ -21,6 +21,7 @@ pub struct CdcEventRef<'a> {
 pub struct CdcColumnRef<'a> {
     pub name: &'a str,
     pub value: CdcValueRef<'a>,
+    pub is_primary_key: bool,
 }
 
 /// Zero-copy value enum that borrows string/bytes data
@@ -66,6 +67,7 @@ impl<'a> CdcColumnRef<'a> {
         CdcColumn {
             name: Arc::from(self.name),
             value: self.value.to_owned_value(),
+            is_primary_key: self.is_primary_key,
         }
     }
 }
