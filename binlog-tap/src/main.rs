@@ -697,7 +697,7 @@ async fn flush_table(
         use std::fmt::Write;
         write!(row_str, ",\"_event_type\":\"{}\"", row.event_type).unwrap();
         // _cdc_timestamp: ISO-8601 UTC timestamp when this event was captured by binlog-tap
-        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f");
         write!(row_str, ",\"_cdc_timestamp\":\"{}\"", ts).unwrap();
         // _is_deleted: 1 for DELETE events (soft-delete tombstone), 0 otherwise
         let is_deleted = if row.event_type == EventType::Delete {
