@@ -328,7 +328,9 @@ async fn process_binlog_stream_zero_copy(
                                             // INSERT or UPDATE: use the after row
                                             (_, Some(row_after), _) => Some(row_after.unwrap()),
                                             // DELETE: use the before row
-                                            (EventType::Delete, None, Some(row_before)) => Some(row_before.unwrap()),
+                                            (EventType::Delete, None, Some(row_before)) => {
+                                                Some(row_before.unwrap())
+                                            }
                                             _ => None,
                                         };
 
@@ -350,9 +352,10 @@ async fn process_binlog_stream_zero_copy(
 
                                                         CdcColumnRef {
                                                             name: column_name,
-                                                            value: CdcValueRef::from_binlog_value_ref(
-                                                                binlog_val,
-                                                            ),
+                                                            value:
+                                                                CdcValueRef::from_binlog_value_ref(
+                                                                    binlog_val,
+                                                                ),
                                                         }
                                                     })
                                                     .collect(),
@@ -530,11 +533,16 @@ async fn flush_table(
     // Parse "db.table" into parts for URL-safe queries
     let table_parts: Vec<&str> = table.splitn(2, '.').collect();
     if table_parts.len() != 2 {
-        return Err(format!("Invalid table identifier '{}': expected 'db.table' format", table).into());
+        return Err(format!(
+            "Invalid table identifier '{}': expected 'db.table' format",
+            table
+        )
+        .into());
     }
 
     // URL-encode the table name for safe embedding in the HTTP query string
-    let table_encoded = format!("{}.{}",
+    let table_encoded = format!(
+        "{}.{}",
         urlencoding::encode(table_parts[0]),
         urlencoding::encode(table_parts[1]),
     );
@@ -546,12 +554,13 @@ async fn flush_table(
             drop(cache); // Release read lock to allow network query
 
             // Use system.tables query — more reliable than non-standard EXISTS TABLE syntax
-            let encoded_db = urlencoding::encode(&table_parts[0]);
-            let encoded_tbl = urlencoding::encode(&table_parts[1]);
-            let encoded_query = urlencoding::encode(&format!(
+            let encoded_db = urlencoding::encode(table_parts[0]);
+            let encoded_tbl = urlencoding::encode(table_parts[1]);
+            let raw_query = format!(
                 "SELECT count() FROM system.tables WHERE database='{}' AND name='{}'",
                 encoded_db, encoded_tbl
-            ));
+            );
+            let encoded_query = urlencoding::encode(&raw_query);
             let check_url = format!("{}/?query={}", args.clickhouse_url, encoded_query);
             let mut check_req = client.get(&check_url);
 
@@ -605,7 +614,8 @@ async fn flush_table(
                 // ReplacingMergeTree: deduplicates rows by primary key on merge.
                 // _is_deleted tombstone pattern: rows with _is_deleted=1 are treated as DELETEs
                 // by querying with FINAL or by the ReplacingMergeTree cleanup logic.
-                create_query.push_str(") ENGINE = ReplacingMergeTree(_cdc_timestamp) ORDER BY tuple()");
+                create_query
+                    .push_str(") ENGINE = ReplacingMergeTree(_cdc_timestamp) ORDER BY tuple()");
 
                 // Send CREATE TABLE as the POST body to ensure Content-Length is provided
                 let mut create_req = client.post(&args.clickhouse_url).body(create_query);
@@ -690,7 +700,11 @@ async fn flush_table(
         let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
         write!(row_str, ",\"_cdc_timestamp\":\"{}\"", ts).unwrap();
         // _is_deleted: 1 for DELETE events (soft-delete tombstone), 0 otherwise
-        let is_deleted = if row.event_type == EventType::Delete { 1u8 } else { 0u8 };
+        let is_deleted = if row.event_type == EventType::Delete {
+            1u8
+        } else {
+            0u8
+        };
         write!(row_str, ",\"_is_deleted\":{}", is_deleted).unwrap();
 
         row_str.push('}');
